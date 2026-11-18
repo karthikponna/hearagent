@@ -1,0 +1,1 @@
+{"session_id":"cc-auth-1","transcript_path":"/nonexistent/transcript.jsonl","cwd":"/Users/dev/projects/auth-service","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"I added **rate limiting** to the login endpoint and all 42 tests pass.\n\n```rust\nfn limit() {}\n```\n\nLet me know if you want the limit configurable."}

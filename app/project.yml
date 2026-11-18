@@ -1,0 +1,66 @@
+name: HearAgent
+options:
+  bundleIdPrefix: com.karthikponna
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "3"
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO
+    ARCHS: arm64
+targets:
+  HearAgent:
+    type: application
+    platform: macOS
+    sources:
+      - path: HearAgent
+        excludes:
+          - "Info.plist"
+      - path: Generated
+        excludes:
+          - "include/**"
+    dependencies:
+      - framework: Frameworks/HearAgentFFI.xcframework
+        embed: false
+      - sdk: Charts.framework
+    info:
+      path: HearAgent/Info.plist
+      properties:
+        CFBundleName: Hear Agent
+        CFBundleDisplayName: Hear Agent
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSAppleEventsUsageDescription: Hear Agent opens Terminal to run your saved actions and resume sessions.
+        HearAgentAPIBaseURL: $(HEARAGENT_API_BASE_URL)
+        CFBundleURLTypes:
+          - CFBundleURLName: com.karthikponna.hearagent
+            CFBundleURLSchemes: [hearagent]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.karthikponna.hearagent
+        PRODUCT_NAME: Hear Agent
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+      configs:
+        Debug:
+          HEARAGENT_API_BASE_URL: http://localhost:8787
+        # Replace with your deployed Worker URL (wrangler deploy prints it), e.g. https://api.hearagent.app
+        Release:
+          HEARAGENT_API_BASE_URL: https://api.hearagent.app
+    postBuildScripts:
+      - name: Bundle hearagent-hook
+        basedOnDependencyAnalysis: false
+        script: |
+          HOOK="${PROJECT_DIR}/../core/target/release/hearagent-hook"
+          if [ ! -x "$HOOK" ]; then
+            echo "error: run scripts/build-rust.sh first"
+            exit 1
+          fi
+          cp "$HOOK" "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/hearagent-hook"

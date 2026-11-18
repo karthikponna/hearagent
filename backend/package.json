@@ -1,0 +1,24 @@
+{
+  "name": "hearagent-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "db:migrate:local": "wrangler d1 migrations apply hearagent --local",
+    "db:migrate:remote": "wrangler d1 migrations apply hearagent --remote"
+  },
+  "dependencies": {
+    "hono": "^4.13.19",
+    "openai": "^7.57.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.8.3",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.163.0"
+  }
+}

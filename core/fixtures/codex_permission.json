@@ -1,0 +1,1 @@
+{"session_id":"codex-ios-7","turn_id":"t-4","cwd":"/Users/dev/projects/ios-app","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}

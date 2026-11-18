@@ -1,0 +1,1 @@
+{"session_id":"cc-auth-1","transcript_path":"/nonexistent/transcript.jsonl","cwd":"/Users/dev/projects/auth-service","hook_event_name":"UserPromptSubmit","prompt":"add rate limiting to the login endpoint"}

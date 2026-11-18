@@ -1,0 +1,12 @@
+.DS_Store
+/core/target/
+/build/
+/dist/
+/app/HearAgent.xcodeproj/
+/app/Generated/
+/app/Frameworks/
+xcuserdata/
+/.tmp/
+/backend/node_modules/
+/backend/.wrangler/
+/backend/.dev.vars

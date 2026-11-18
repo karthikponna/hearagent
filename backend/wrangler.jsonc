@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hearagent-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hearagent",
+      // Replace with the id printed by `npx wrangler d1 create hearagent`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "APP_URL_SCHEME": "hearagent",
+    "OPENAI_MODEL": "gpt-5-mini",
+    "ELEVENLABS_MODEL": "eleven_flash_v2_5",
+    // George
+    "ELEVENLABS_VOICE_ID": "JBFqnCBsd6RMkjVDRZzb",
+    "DODO_ENVIRONMENT": "test_mode",
+    "DODO_PRODUCT_ID": "",
+    // Public origin used for OAuth redirects, e.g. https://api.hearagent.dev. Empty = request origin.
+    "PUBLIC_URL": "",
+    // "1" returns canned text and a beep instead of calling OpenAI and ElevenLabs (local testing only).
+    "MOCK_PROVIDERS": "0"
+  }
+}
