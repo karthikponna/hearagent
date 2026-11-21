@@ -1,5 +1,8 @@
 use hearagent_core::event::Agent;
-use hearagent_core::installer::{backup_path, config_path, install, installed_hook_command, is_installed, uninstall};
+use hearagent_core::installer::{
+    backup_path, config_path, install, installed_hook_command, is_installed, needs_upgrade, uninstall, CLAUDE_APPROVAL_WAIT_SECS,
+    CODEX_APPROVAL_WAIT_SECS,
+};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -102,8 +105,33 @@ fn codex_uses_its_own_file_and_events() {
     assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], format!("'{HOOK}' codex"));
     assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5);
     assert!(v["hooks"]["PermissionRequest"].is_array());
-    assert!(v["hooks"].get("PreToolUse").is_none(), "mid-run hooks are not installed");
+    assert!(v["hooks"]["PreToolUse"].is_array(), "tool calls feed live activity");
+    let wait = v["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"].as_u64().unwrap();
+    assert!(wait > CODEX_APPROVAL_WAIT_SECS, "Codex lets the hook wait for the notch");
     assert!(!is_installed(Agent::ClaudeCode, home.path()));
+}
+
+#[test]
+fn claude_permission_hook_waits_and_tool_hook_does_not() {
+    let home = tempfile::tempdir().unwrap();
+    let path = install(Agent::ClaudeCode, home.path(), Path::new(HOOK)).unwrap();
+    let v = read(&path);
+    let permission = &v["hooks"]["PermissionRequest"][0]["hooks"][0];
+    assert!(permission.get("async").is_none(), "an async hook can't return a decision");
+    assert!(permission["timeout"].as_u64().unwrap() > CLAUDE_APPROVAL_WAIT_SECS);
+    assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["async"], true);
+    assert!(!needs_upgrade(Agent::ClaudeCode, home.path()));
+}
+
+#[test]
+fn older_installs_need_an_upgrade() {
+    let home = tempfile::tempdir().unwrap();
+    let path = config_path(Agent::ClaudeCode, home.path());
+    let entry = json!([{ "hooks": [{ "type": "command", "command": format!("'{HOOK}' claude-code"), "async": true }] }]);
+    write(&path, &json!({ "hooks": { "Stop": entry, "PermissionRequest": entry } }));
+    assert!(needs_upgrade(Agent::ClaudeCode, home.path()));
+    install(Agent::ClaudeCode, home.path(), Path::new(HOOK)).unwrap();
+    assert!(!needs_upgrade(Agent::ClaudeCode, home.path()));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import OpenAI from "openai";
 import { base64 } from "./crypto";
-import { creditsRemaining, getSubscription, hasAccess, isoOrNull, refundCredits, spendCredits } from "./db";
+import { creditsRemaining, hasAccess } from "./db";
 import type { AppContext, AppEnv } from "./env";
 
 const MAX_SPOKEN_CHARS = 220;
@@ -52,36 +52,37 @@ speak.post("/", async (c) => {
   if (!req) return c.json({ error: "invalid_request" }, 400);
 
   const user = c.get("user");
-  const sub = await getSubscription(c.env.DB, user.id);
+  const store = c.var.store;
+  const sub = await store.subscription(user.id);
   if (!sub || !hasAccess(sub)) return c.json({ error: "no_subscription" }, 402);
   if (creditsRemaining(sub) <= 0) {
-    return c.json({ error: "credits_exhausted", period_end: isoOrNull(sub.period_end) }, 402);
+    return c.json({ error: "credits_exhausted", period_end: sub.credits_reset_at }, 402);
   }
 
   const text = capSpoken(await writeLine(c.env, req));
   const cost = [...text].length;
-  if (!(await spendCredits(c.env.DB, user.id, cost))) {
-    return c.json({ error: "credits_exhausted", period_end: isoOrNull(sub.period_end) }, 402);
+  const spent = await store.spendCredits(user.id, cost);
+  if (!spent.ok) {
+    return c.json({ error: "credits_exhausted", period_end: spent.credits_reset_at }, 402);
   }
 
   let audio: { data: ArrayBuffer; format: string };
   try {
     audio = await synthesize(c.env, text);
   } catch (e) {
-    await refundCredits(c.env.DB, user.id, cost);
+    await store.refundCredits(user.id, cost);
     console.log(JSON.stringify({ event: "tts_error", message: String(e) }));
     return c.json({ error: "tts_failed" }, 502);
   }
 
-  const remaining = creditsRemaining({ ...sub, credits_used: sub.credits_used + cost });
   console.log(JSON.stringify({ event: "speak", kind: req.kind, chars: cost, user: user.id }));
   return c.json({
     text,
     audio_base64: base64(audio.data),
     audio_format: audio.format,
-    credits_remaining: remaining,
-    credits_total: sub.credits_total,
-    period_end: isoOrNull(sub.period_end),
+    credits_remaining: spent.credits_remaining,
+    credits_total: spent.credits_total,
+    period_end: spent.credits_reset_at,
   });
 });
 

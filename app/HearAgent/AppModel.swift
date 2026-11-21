@@ -20,6 +20,9 @@ final class AppModel {
     private(set) var accountState: HearAccountState = .signedOut
     private(set) var account: HearAccount?
     private(set) var isSigningIn = false
+    /// A Supabase session exists, even if the account hasn't loaded (yet).
+    private(set) var hasSession = false
+    private(set) var avatarURL: URL?
     private(set) var accountError: String?
 
     let usage: UsageStore
@@ -27,12 +30,20 @@ final class AppModel {
     let actions: ActionStore
     private(set) var history: [SpokenUpdate] = []
     var page: DashboardPage = .overview
+    var settingsPane: SettingsPane = .general
+    var usageRange: UsageRange = .sixMonths
+    /// A start-to-end range picked in the calendar; overrides the preset while set.
+    var usageCustom: DayRange?
+    /// Bumped by "Show me" so the notch opens for a moment.
+    private(set) var notchPeekTick = 0
     /// Bumped when a session starts needing the user, so the notch can open itself.
     private(set) var attentionTick = 0
 
     @ObservationIgnored private var engine: Engine
     @ObservationIgnored private let player = AudioPlayer()
     @ObservationIgnored private var pendingSignIn: HearSignIn?
+    /// Only the real app (not previews or snapshots) reads and writes the Keychain.
+    @ObservationIgnored private var usesKeychain = false
     @ObservationIgnored private var replaying = false
 
     /// `listen: false` builds a model that never touches the shared socket, agent configs, or the keychain.
@@ -41,10 +52,11 @@ final class AppModel {
         usage = UsageStore(preferences: preferences)
         actions = ActionStore(preferences: preferences)
         let events = EngineEvents()
-        engine = Engine(listener: events, apiBaseUrl: preferences.apiBaseURL)
+        engine = Engine(listener: events, apiBaseUrl: preferences.apiBaseURL, supabaseUrl: preferences.supabaseURL, supabaseKey: preferences.supabaseKey)
         events.model = self
         engine.setMuted(muted: preferences.muted)
         applySpokenKinds()
+        applyAllowRules()
         player.volume = Float(preferences.volume)
         player.onFinished = { [weak self] in
             guard let self else { return }
@@ -56,8 +68,12 @@ final class AppModel {
         }
         guard listen else { return }
         usage.start()
-        let token = Keychain.loadToken()
-        engine.setToken(token: token)
+        usesKeychain = true
+        Keychain.deleteLegacyToken()
+        let session = Keychain.loadSession()
+        hasSession = session != nil
+        avatarURL = session.flatMap(Self.avatarURL(fromSession:))
+        engine.setSession(session: session)
         do {
             let path = try engine.start(socketPath: nil)
             Self.log.info("listening on \(path, privacy: .public)")
@@ -66,7 +82,7 @@ final class AppModel {
         }
         repointMovedHooks()
         refreshHookStatus()
-        if token != nil { refreshAccount() }
+        if session != nil { refreshAccount() }
     }
 
     // MARK: Playback
@@ -141,6 +157,68 @@ final class AppModel {
         sessions.filter { $0.status == .needsYou || $0.status == .failed }
     }
 
+    /// Sessions whose agent is waiting on a permission answer from Hear Agent.
+    var pendingApprovals: [HearSession] {
+        sessions.filter { $0.pending != nil }
+    }
+
+    func session(key: String) -> HearSession? {
+        sessions.first { $0.key == key }
+    }
+
+    /// The engine key of a usage record ("claude-code:<id>").
+    static func key(for usage: HearSessionUsage) -> String {
+        (usage.agent == .claudeCode ? "claude-code:" : "codex:") + usage.id
+    }
+
+    // MARK: Approvals
+
+    enum ApprovalChoice { case allow, deny, alwaysAllow, terminal }
+
+    func decide(_ session: HearSession, _ choice: ApprovalChoice) {
+        guard let pending = session.pending else {
+            if choice == .terminal { TerminalLauncher.focus(cwd: session.cwd) }
+            return
+        }
+        switch choice {
+        case .allow:
+            _ = engine.decide(approvalId: pending.id, decision: .allow)
+        case .deny:
+            _ = engine.decide(approvalId: pending.id, decision: .deny)
+        case .alwaysAllow:
+            let rule = suggestAllowRule(tool: pending.tool, subject: pending.subject, cwd: session.cwd)
+            addAllowRule(AllowRuleItem(tool: rule.tool, pattern: rule.pattern))
+            _ = engine.decide(approvalId: pending.id, decision: .allow)
+        case .terminal:
+            _ = engine.decide(approvalId: pending.id, decision: .ask)
+            TerminalLauncher.focus(cwd: session.cwd)
+        }
+    }
+
+    /// The rule "Always allow" would save for a request, for its label.
+    func suggestedRule(for session: HearSession) -> AllowRuleItem? {
+        guard let p = session.pending else { return nil }
+        let r = suggestAllowRule(tool: p.tool, subject: p.subject, cwd: session.cwd)
+        return AllowRuleItem(tool: r.tool, pattern: r.pattern)
+    }
+
+    func addAllowRule(_ rule: AllowRuleItem) {
+        guard !preferences.allowRules.contains(rule) else { return }
+        preferences.allowRules.append(rule)
+        applyAllowRules()
+    }
+
+    func removeAllowRule(_ rule: AllowRuleItem) {
+        preferences.allowRules.removeAll { $0 == rule }
+        applyAllowRules()
+    }
+
+    private func applyAllowRules() {
+        engine.setAllowRules(rules: preferences.allowRules.map { HearAllowRule(tool: $0.tool, pattern: $0.pattern) })
+    }
+
+    var isListening: Bool { engineError == nil }
+
     func togglePin(_ session: HearSession) {
         engine.setPinned(sessionKey: session.pinned ? nil : session.key)
     }
@@ -149,6 +227,20 @@ final class AppModel {
     func injectSample(agent: String, payload: String) -> Bool {
         engine.injectPayload(agent: agent, payloadJson: payload)
     }
+
+    /// Speaks a sample "finished" update through the real pipeline, as a hook would.
+    func sendTestUpdate() {
+        let payload: [String: Any] = [
+            "session_id": "hear-agent-test",
+            "cwd": NSHomeDirectory() + "/Hear Agent",
+            "hook_event_name": "Stop",
+            "last_assistant_message": "This is a test update. Hear Agent is set up and will speak here whenever an agent finishes or needs you.",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload), let json = String(data: data, encoding: .utf8) else { return }
+        injectSample(agent: "claude-code", payload: json)
+    }
+
+    func peekNotch() { notchPeekTick += 1 }
 
     fileprivate func received(_ utterance: HearUtterance) {
         lastSpoken = utterance.text
@@ -169,13 +261,39 @@ final class AppModel {
     fileprivate func sessionsChanged(_ sessions: [HearSession]) {
         let before = Set(self.sessions.filter { $0.status == .needsYou }.map(\.key))
         let finishedBefore = Set(self.sessions.filter { $0.status == .done }.map(\.key))
+        let pendingBefore = Set(self.sessions.compactMap { $0.pending?.id })
         self.sessions = sessions
         if sessions.contains(where: { $0.status == .needsYou && !before.contains($0.key) }) {
             attentionTick += 1
         }
-        // New finished turns mean new usage on disk.
-        if sessions.contains(where: { $0.status == .done && !finishedBefore.contains($0.key) }) {
+        for s in sessions {
+            guard let p = s.pending, !pendingBefore.contains(p.id) else { continue }
+            if !preferences.approveFromNotch {
+                _ = engine.decide(approvalId: p.id, decision: .ask)
+                continue
+            }
+            if preferences.notifyOnPermission && !NSApp.isActive {
+                postNotification(id: "approval-\(p.id)", title: "\(s.name) needs permission", body: p.subject.isEmpty ? p.action : "\(p.tool): \(p.subject)")
+            }
+        }
+        let newlyDone = sessions.filter { $0.status == .done && !finishedBefore.contains($0.key) }
+        if !newlyDone.isEmpty {
+            // New finished turns mean new usage on disk.
             usage.refresh()
+            if preferences.notifyOnFinish && !NSApp.isActive {
+                for s in newlyDone { postNotification(id: "done-\(s.key)", title: "\(s.name) finished", body: s.lastUpdate) }
+            }
+        }
+    }
+
+    private func postNotification(id: String, title: String, body: String) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
         }
     }
 
@@ -184,7 +302,6 @@ final class AppModel {
         accountState = state
         Self.log.info("account state: \(String(describing: state), privacy: .public)")
         if state == .signedOut, previous != .signedOut {
-            Keychain.deleteToken()
             account = nil
         }
         notifyIfNewlyBlocked(previous: previous, current: state)
@@ -194,21 +311,35 @@ final class AppModel {
 
     var isSignedIn: Bool { account != nil || accountState != .signedOut }
 
-    func signIn() {
-        let request = engine.startSignIn()
+    /// Persists the Supabase session whenever the engine signs in, refreshes or signs out.
+    fileprivate func sessionChanged(_ session: String?) {
+        hasSession = session != nil
+        avatarURL = session.flatMap(Self.avatarURL(fromSession:))
+        guard usesKeychain else { return }
+        if let session { Keychain.saveSession(session) } else { Keychain.deleteSession() }
+    }
+
+    func signIn(with provider: HearAuthProvider = .google) {
+        let request = engine.startSignIn(provider: provider)
         pendingSignIn = request
         isSigningIn = true
         accountError = nil
         if let url = URL(string: request.url) { NSWorkspace.shared.open(url) }
     }
 
-    /// Handles `hearagent://auth?code=…&state=…` and `hearagent://billing?…`.
+    /// Handles `hearagent://auth?code=…` (Supabase sign-in) and `hearagent://billing?…`.
     func handle(url: URL) {
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
         let query = Dictionary(uniqueKeysWithValues: (parts.queryItems ?? []).map { ($0.name, $0.value ?? "") })
         switch parts.host {
         case "auth":
-            guard let pending = pendingSignIn, query["state"] == pending.state, let code = query["code"] else {
+            if let reason = query["error_description"] ?? query["error"] {
+                pendingSignIn = nil
+                isSigningIn = false
+                accountError = "Sign-in didn't finish: \(reason.replacingOccurrences(of: "+", with: " "))"
+                return
+            }
+            guard let pending = pendingSignIn, let code = query["code"], !code.isEmpty else {
                 accountError = "That sign-in link is out of date. Please try again."
                 isSigningIn = false
                 return
@@ -220,8 +351,7 @@ final class AppModel {
                 await MainActor.run {
                     self.isSigningIn = false
                     switch result {
-                    case .success(let token):
-                        Keychain.saveToken(token)
+                    case .success:
                         self.refreshAccount()
                     case .failure(let error):
                         self.accountError = "Sign-in failed: \(error.localizedDescription)"
@@ -253,14 +383,41 @@ final class AppModel {
         }
     }
 
+    /// The profile photo the sign-in provider shared (Google does, Apple doesn't), read from the
+    /// `user_metadata` claim of the stored Supabase access token.
+    static func avatarURL(fromSession session: String) -> URL? {
+        guard let json = try? JSONSerialization.jsonObject(with: Data(session.utf8)) as? [String: Any],
+              let token = json["access_token"] as? String else { return nil }
+        let parts = token.split(separator: ".")
+        guard parts.count > 1 else { return nil }
+        var payload = parts[1].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        guard let data = Data(base64Encoded: payload),
+              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let meta = claims["user_metadata"] as? [String: Any],
+              let link = (meta["avatar_url"] ?? meta["picture"]) as? String else { return nil }
+        return URL(string: link)
+    }
+
     func signOut() {
         let engine = self.engine
-        Keychain.deleteToken()
         account = nil
+        hasSession = false
+        avatarURL = nil
         Task.detached { engine.signOut() }
     }
 
-    func openCheckout() { openBillingURL { try $0.checkoutUrl() } }
+    /// `plan`: "monthly", "yearly" or "lifetime" (ids in the Supabase plans table).
+    func openCheckout(plan: String = "monthly") { openBillingURL { try $0.checkoutUrl(plan: plan) } }
+
+    /// Brings a running session's terminal forward, or reopens a finished one in Terminal.
+    func openSession(_ usage: HearSessionUsage) {
+        if let live = liveSession(for: usage), live.status != .done {
+            TerminalLauncher.focus(cwd: live.cwd)
+        } else {
+            TerminalLauncher.resume(usage)
+        }
+    }
 
     func openPortal() { openBillingURL { try $0.portalUrl() } }
 
@@ -395,5 +552,9 @@ private final class EngineEvents: EngineListener, @unchecked Sendable {
 
     func accountStateChanged(state: HearAccountState) {
         Task { @MainActor [weak self] in self?.model?.accountStateChanged(state) }
+    }
+
+    func sessionChanged(session: String?) {
+        Task { @MainActor [weak self] in self?.model?.sessionChanged(session) }
     }
 }

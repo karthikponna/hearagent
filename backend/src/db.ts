@@ -1,123 +1,147 @@
-import { nowSeconds, randomToken, sha256Hex } from "./crypto";
-import type { User } from "./env";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { AppEnv, User } from "./env";
 
-const SESSION_TTL_SECONDS = 180 * 24 * 60 * 60;
 /** Renewal webhooks can arrive a little after the billing date. */
-const RENEWAL_GRACE_SECONDS = 3 * 24 * 60 * 60;
+const RENEWAL_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
 
-export interface SubscriptionRow {
-  user_id: string;
-  dodo_subscription_id: string | null;
-  dodo_customer_id: string | null;
-  plan_id: string;
-  plan_name: string;
-  status: string;
-  period_start: number | null;
-  period_end: number | null;
-  cancel_at_period_end: number;
-  credits_total: number;
-  credits_used: number;
-}
-
-export interface PlanRow {
+export interface Plan {
   id: string;
   name: string;
+  billing_interval: "month" | "year" | "lifetime";
   price_cents: number;
   monthly_credits: number;
   dodo_product_id: string | null;
 }
 
-export async function upsertGoogleUser(db: D1Database, sub: string, email: string, name: string): Promise<User> {
-  const row = await db
-    .prepare(
-      `INSERT INTO users (id, google_sub, email, name, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
-       ON CONFLICT(google_sub) DO UPDATE SET email = excluded.email, name = excluded.name
-       RETURNING id, email, name`,
-    )
-    .bind(crypto.randomUUID(), sub, email, name, nowSeconds())
-    .first<User>();
-  return row!;
+export interface Subscription {
+  user_id: string;
+  plan_id: string;
+  status: string;
+  dodo_subscription_id: string | null;
+  dodo_payment_id: string | null;
+  dodo_customer_id: string | null;
+  current_period_start: string | null;
+  current_period_end: string | null;
+  cancel_at_period_end: boolean;
+  credits_total: number;
+  credits_used: number;
+  credits_reset_at: string | null;
 }
 
-export async function createSession(db: D1Database, userId: string): Promise<string> {
-  const token = `ha_${randomToken(32)}`;
-  const now = nowSeconds();
-  await db
-    .prepare("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)")
-    .bind(await sha256Hex(token), userId, now, now + SESSION_TTL_SECONDS)
-    .run();
-  return token;
+export type SubscriptionWrite = Omit<Subscription, "credits_used"> & { credits_used?: number };
+
+export interface SpendResult {
+  ok: boolean;
+  credits_remaining: number;
+  credits_total: number;
+  credits_reset_at: string | null;
 }
 
-export async function userForToken(db: D1Database, token: string): Promise<User | null> {
-  return db
-    .prepare(
-      `SELECT u.id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = ?1 AND s.expires_at > ?2`,
-    )
-    .bind(await sha256Hex(token), nowSeconds())
-    .first<User>();
+/** Everything the Worker reads or writes. Supabase in production, in memory in tests. */
+export interface Store {
+  /** Verifies a Supabase access token. */
+  userForToken(token: string): Promise<User | null>;
+  /** The user's subscription, after any monthly credit refill that is due. */
+  subscription(userId: string): Promise<Subscription | null>;
+  plan(id: string): Promise<Plan | null>;
+  planForProduct(productId: string): Promise<Plan | null>;
+  spendCredits(userId: string, amount: number): Promise<SpendResult>;
+  refundCredits(userId: string, amount: number): Promise<void>;
+  /** Records a webhook delivery; false if it was already seen. */
+  recordWebhook(id: string, type: string): Promise<boolean>;
+  webhookUser(userId: string | null, subscriptionId: string | null, email: string | null): Promise<string | null>;
+  saveSubscription(row: SubscriptionWrite): Promise<void>;
 }
 
-export async function deleteSession(db: D1Database, token: string): Promise<void> {
-  await db.prepare("DELETE FROM sessions WHERE token_hash = ?1").bind(await sha256Hex(token)).run();
-}
-
-export async function getSubscription(db: D1Database, userId: string): Promise<SubscriptionRow | null> {
-  return db
-    .prepare(
-      `SELECT s.*, p.name AS plan_name FROM subscriptions s JOIN plans p ON p.id = s.plan_id WHERE s.user_id = ?1`,
-    )
-    .bind(userId)
-    .first<SubscriptionRow>();
-}
-
-export function hasAccess(sub: SubscriptionRow | null, now = nowSeconds()): boolean {
+export function hasAccess(sub: Subscription | null, now = Date.now()): boolean {
   if (!sub) return false;
-  const inPeriod = sub.period_end === null || now < sub.period_end;
+  const end = sub.current_period_end ? Date.parse(sub.current_period_end) : null;
   switch (sub.status) {
     case "active":
-      return sub.period_end === null || now < sub.period_end + RENEWAL_GRACE_SECONDS;
+      return end === null || now < end + RENEWAL_GRACE_MS;
     case "cancelled":
       // Cancelled mid-period: keep what they paid for until the period ends.
-      return inPeriod;
+      return end === null || now < end;
     default:
       return false;
   }
 }
 
-export function creditsRemaining(sub: SubscriptionRow): number {
+export function creditsRemaining(sub: Pick<Subscription, "credits_total" | "credits_used">): number {
   return Math.max(0, sub.credits_total - sub.credits_used);
 }
 
-/** Atomically spends credits. Returns false if not enough remain. */
-export async function spendCredits(db: D1Database, userId: string, amount: number): Promise<boolean> {
-  const result = await db
-    .prepare(
-      `UPDATE subscriptions SET credits_used = credits_used + ?1, updated_at = ?3
-       WHERE user_id = ?2 AND credits_used + ?1 <= credits_total`,
-    )
-    .bind(amount, userId, nowSeconds())
-    .run();
-  return result.meta.changes === 1;
-}
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export async function refundCredits(db: D1Database, userId: string, amount: number): Promise<void> {
-  await db
-    .prepare("UPDATE subscriptions SET credits_used = MAX(0, credits_used - ?1), updated_at = ?3 WHERE user_id = ?2")
-    .bind(amount, userId, nowSeconds())
-    .run();
-}
+export function supabaseStore(env: AppEnv): Store {
+  const db: SupabaseClient = createClient(env.SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  });
+  const fail = (what: string, error: { message: string } | null) => {
+    if (error) throw new Error(`supabase ${what}: ${error.message}`);
+  };
 
-export async function planForProduct(db: D1Database, productId: string, defaultProductId: string): Promise<PlanRow | null> {
-  const byProduct = await db.prepare("SELECT * FROM plans WHERE dodo_product_id = ?1").bind(productId).first<PlanRow>();
-  if (byProduct) return byProduct;
-  if (defaultProductId && productId === defaultProductId) {
-    return db.prepare("SELECT * FROM plans WHERE id = 'starter'").first<PlanRow>();
-  }
-  return null;
-}
+  return {
+    async userForToken(token) {
+      const { data, error } = await db.auth.getClaims(token);
+      if (error || !data?.claims?.sub || data.claims.role !== "authenticated") return null;
+      const c = data.claims as Record<string, unknown> & { sub: string };
+      const meta = (c.user_metadata ?? {}) as Record<string, unknown>;
+      return {
+        id: c.sub,
+        email: typeof c.email === "string" ? c.email : "",
+        name: String(meta.full_name ?? meta.name ?? ""),
+      };
+    },
 
-export function isoOrNull(seconds: number | null): string | null {
-  return seconds === null ? null : new Date(seconds * 1000).toISOString();
+    async subscription(userId) {
+      const { data, error } = await db.rpc("current_subscription", { p_user_id: userId });
+      fail("current_subscription", error);
+      return ((data as Subscription[] | null) ?? [])[0] ?? null;
+    },
+
+    async plan(id) {
+      const { data, error } = await db.from("plans").select("*").eq("id", id).eq("active", true).maybeSingle();
+      fail("plan", error);
+      return data as Plan | null;
+    },
+
+    async planForProduct(productId) {
+      const { data, error } = await db.from("plans").select("*").eq("dodo_product_id", productId).maybeSingle();
+      fail("planForProduct", error);
+      return data as Plan | null;
+    },
+
+    async spendCredits(userId, amount) {
+      const { data, error } = await db.rpc("spend_credits", { p_user_id: userId, p_amount: amount });
+      fail("spend_credits", error);
+      return ((data as SpendResult[] | null) ?? [])[0] ?? { ok: false, credits_remaining: 0, credits_total: 0, credits_reset_at: null };
+    },
+
+    async refundCredits(userId, amount) {
+      const { error } = await db.rpc("refund_credits", { p_user_id: userId, p_amount: amount });
+      fail("refund_credits", error);
+    },
+
+    async recordWebhook(id, type) {
+      const { data, error } = await db.from("webhook_events").upsert({ id, type }, { onConflict: "id", ignoreDuplicates: true }).select("id");
+      fail("webhook_events", error);
+      return (data ?? []).length > 0;
+    },
+
+    async webhookUser(userId, subscriptionId, email) {
+      const { data, error } = await db.rpc("webhook_user", {
+        p_user_id: userId && UUID_RE.test(userId) ? userId : null,
+        p_subscription_id: subscriptionId,
+        p_email: email,
+      });
+      fail("webhook_user", error);
+      return (data as string | null) ?? null;
+    },
+
+    async saveSubscription(row) {
+      const { error } = await db.from("subscriptions").upsert({ ...row, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+      fail("saveSubscription", error);
+    },
+  };
 }

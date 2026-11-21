@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { capSpoken, clean, fallbackLine, parseRequest } from "../src/speak";
-import { call, giveSubscription, mockFetch, signedInUser, testEnv } from "./helpers";
+import { harness, mockFetch } from "./helpers";
 
 let restore = () => {};
 afterEach(() => restore());
@@ -28,14 +28,19 @@ function providers(text = "Hey, tool timeout mcp just finished adding the timeou
   });
 }
 
+let h = harness();
+beforeEach(() => (h = harness()));
+const signedInUser = () => h.signedInUser();
+const giveSubscription = (...args: Parameters<typeof h.giveSubscription>) => h.giveSubscription(...args);
+
 async function post(body: unknown, headers: Record<string, string>) {
-  return call("/v1/speak", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return h.call("/v1/speak", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
 }
 
 describe("/v1/speak", () => {
   it("writes a summary with GPT-5 mini, voices it with George, and spends credits", async () => {
-    const { user, auth } = await signedInUser();
-    await giveSubscription(user.id, { credits: 150000 });
+    const { user, auth } = signedInUser();
+    giveSubscription(user.id, { credits: 150000 });
     const mock = providers();
     restore = mock.restore;
 
@@ -62,8 +67,8 @@ describe("/v1/speak", () => {
   });
 
   it("voices approvals without calling GPT", async () => {
-    const { user, auth } = await signedInUser();
-    await giveSubscription(user.id);
+    const { user, auth } = signedInUser();
+    giveSubscription(user.id);
     const mock = providers();
     restore = mock.restore;
     const res = await post({ kind: "approval", agent: "Claude", name: "auth service", text: "auth service needs approval to remove node_modules directory." }, auth);
@@ -73,33 +78,33 @@ describe("/v1/speak", () => {
   });
 
   it("refuses without a subscription and when credits run out", async () => {
-    const { user, auth } = await signedInUser();
+    const { user, auth } = signedInUser();
     expect((await post(summaryBody, auth)).status).toBe(402);
     expect(await (await post(summaryBody, auth)).json()).toEqual({ error: "no_subscription" });
 
-    await giveSubscription(user.id, { credits: 150000, used: 150000 });
+    giveSubscription(user.id, { credits: 150000, used: 150000 });
     const res = await post(summaryBody, auth);
     expect(res.status).toBe(402);
     expect((await res.json<{ error: string }>()).error).toBe("credits_exhausted");
   });
 
   it("refuses when the line would exceed remaining credits", async () => {
-    const { user, auth } = await signedInUser();
-    await giveSubscription(user.id, { credits: 150000, used: 149990 });
+    const { user, auth } = signedInUser();
+    giveSubscription(user.id, { credits: 150000, used: 149990 });
     restore = providers().restore;
     const res = await post(summaryBody, auth);
     expect(res.status).toBe(402);
   });
 
   it("refuses expired subscriptions", async () => {
-    const { user, auth } = await signedInUser();
-    await giveSubscription(user.id, { status: "expired" });
+    const { user, auth } = signedInUser();
+    giveSubscription(user.id, { status: "expired" });
     expect((await post(summaryBody, auth)).status).toBe(402);
   });
 
   it("falls back to the trimmed reply when GPT fails, and refunds if voice fails", async () => {
-    const { user, auth } = await signedInUser();
-    await giveSubscription(user.id, { credits: 1000 });
+    const { user, auth } = signedInUser();
+    giveSubscription(user.id, { credits: 1000 });
     let mock = mockFetch({
       "https://api.openai.com/": () => new Response("down", { status: 500 }),
       "https://api.elevenlabs.io/": () => new Response(mp3),
@@ -112,16 +117,16 @@ describe("/v1/speak", () => {
 
     mock = mockFetch({ "https://api.elevenlabs.io/": () => new Response("no", { status: 503 }) });
     restore = mock.restore;
-    const before = await testEnv.DB.prepare("SELECT credits_used FROM subscriptions WHERE user_id = ?1").bind(user.id).first<number>("credits_used");
+    const before = h.store.subs.get(user.id)!.credits_used;
     const failed = await post({ kind: "approval", agent: "Claude", name: "x", text: "x needs approval to run ls." }, auth);
     expect(failed.status).toBe(502);
-    const after = await testEnv.DB.prepare("SELECT credits_used FROM subscriptions WHERE user_id = ?1").bind(user.id).first<number>("credits_used");
+    const after = h.store.subs.get(user.id)!.credits_used;
     expect(after).toBe(before);
   });
 
   it("rejects bad requests", async () => {
-    const { user, auth } = await signedInUser();
-    await giveSubscription(user.id);
+    const { user, auth } = signedInUser();
+    giveSubscription(user.id);
     expect((await post({ kind: "poem", name: "x" }, auth)).status).toBe(400);
     expect((await post({ kind: "approval", name: "x" }, auth)).status).toBe(400);
     expect((await post({ kind: "summary" }, auth)).status).toBe(400);

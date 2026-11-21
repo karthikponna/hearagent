@@ -144,6 +144,7 @@ pub fn detect_framework(process: &str, command: &str, port: u16) -> String {
         ("nuxt", "Nuxt"),
         ("remix", "Remix"),
         ("storybook", "Storybook"),
+        ("remotion", "Remotion"),
         ("wrangler", "Wrangler"),
         ("workerd", "Wrangler"),
         ("uvicorn", "FastAPI"),

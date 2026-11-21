@@ -7,8 +7,28 @@
 
 use crate::event::{Agent, AgentEvent, EventKind};
 use crate::speech::{display_update, speech_for, Priority, SpeechKind, SpeechRequest};
+use crate::transcript::{apply_task_tool, tool_line, Todo};
 use serde::Serialize;
 use std::collections::HashMap;
+
+/// The tool call a session is running right now.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Activity {
+    pub tool: String,
+    /// "Edit app/page.tsx", "Bash pnpm test".
+    pub line: String,
+    pub at_ms: u64,
+}
+
+/// A permission request whose hook is waiting for an answer.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PendingApproval {
+    pub id: u64,
+    pub tool: String,
+    pub subject: String,
+    pub action: String,
+    pub at_ms: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +50,13 @@ pub struct SessionInfo {
     pub last_update: String,
     pub last_event_ms: u64,
     pub pinned: bool,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub last_prompt: String,
+    pub last_message: String,
+    pub activity: Option<Activity>,
+    pub todos: Vec<Todo>,
+    pub pending: Option<PendingApproval>,
     #[serde(skip)]
     seq: u64,
 }
@@ -112,16 +139,59 @@ impl Dispatcher {
             last_update: String::new(),
             last_event_ms: now_ms,
             pinned: false,
+            session_id: event.session_id.clone(),
+            transcript_path: String::new(),
+            last_prompt: String::new(),
+            last_message: String::new(),
+            activity: None,
+            todos: Vec::new(),
+            pending: None,
             seq: 0,
         });
-        session.seq += 1;
         session.last_event_ms = now_ms;
         if !event.cwd.is_empty() {
             session.cwd = event.cwd.clone();
             session.name = event.location.display_name();
         }
+        if !event.extra.transcript_path.is_empty() {
+            session.transcript_path = event.extra.transcript_path.clone();
+        }
+
+        // Tool calls update what the session is doing but are never spoken, and
+        // don't count as "newer" for a waiting approval line.
+        if let EventKind::ToolStarted { tool, input } = &event.kind {
+            if !apply_task_tool(&mut session.todos, tool, input) {
+                session.activity = Some(Activity { tool: tool.clone(), line: tool_line(tool, Some(input)), at_ms: now_ms });
+            }
+            if session.pending.is_none() {
+                session.status = SessionStatus::Working;
+            }
+            return None;
+        }
+
+        session.seq += 1;
         if let Some(update) = display_update(&event) {
             session.last_update = update;
+        }
+        match &event.kind {
+            EventKind::PromptSubmitted => {
+                if !event.extra.prompt.trim().is_empty() {
+                    session.last_prompt = event.extra.prompt.trim().to_string();
+                }
+                session.last_message.clear();
+                session.activity = None;
+                session.pending = None;
+            }
+            EventKind::Finished { message, .. } => {
+                session.last_message = message.trim().to_string();
+                session.activity = None;
+                session.pending = None;
+            }
+            EventKind::StoppedWithError { .. } => {
+                session.activity = None;
+                session.pending = None;
+            }
+            _ => {}
         }
 
         let mut request = speech_for(&event);
@@ -205,6 +275,37 @@ impl Dispatcher {
 
     fn pinned_key(&self) -> Option<String> {
         self.sessions.values().find(|s| s.pinned).map(|s| s.key.clone())
+    }
+
+    /// Records that a session's approval hook is waiting on `approval.id`.
+    pub fn set_pending(&mut self, session_key: &str, approval: PendingApproval) {
+        if let Some(s) = self.sessions.get_mut(session_key) {
+            s.pending = Some(approval);
+            s.status = SessionStatus::NeedsYou;
+        }
+    }
+
+    /// The session waiting on an approval id.
+    pub fn pending_session(&self, approval_id: u64) -> Option<SessionInfo> {
+        self.sessions.values().find(|s| s.pending.as_ref().is_some_and(|p| p.id == approval_id)).cloned()
+    }
+
+    /// Clears a waiting approval once it is answered or its hook goes away.
+    /// `answered` moves the session back to working and drops its unplayed approval line.
+    pub fn clear_pending(&mut self, approval_id: u64, answered: bool, now_ms: u64) -> bool {
+        let Some(s) = self.sessions.values_mut().find(|s| s.pending.as_ref().is_some_and(|p| p.id == approval_id)) else {
+            return false;
+        };
+        s.pending = None;
+        if answered {
+            s.status = SessionStatus::Working;
+            s.last_update = "Working…".into();
+            s.last_event_ms = now_ms;
+            s.seq += 1;
+            let key = s.key.clone();
+            self.queue.retain(|q| !(q.speech.session_key == key && q.speech.kind == SpeechKind::Approval));
+        }
+        true
     }
 
     /// Pins one session (or none); a pinned session's lines win ties.

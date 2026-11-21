@@ -86,7 +86,7 @@ pub fn speech_for(event: &AgentEvent) -> Option<SpeechRequest> {
                 .join(" | ");
             Some(SpeechRequest { error: Some(reason), ..base(SpeechKind::StopFailure, Priority::Failed) })
         }
-        EventKind::SessionStarted | EventKind::SessionEnded | EventKind::PromptSubmitted => None,
+        EventKind::SessionStarted | EventKind::SessionEnded | EventKind::PromptSubmitted | EventKind::ToolStarted { .. } => None,
     }
 }
 
@@ -119,6 +119,6 @@ pub fn display_update(event: &AgentEvent) -> Option<String> {
             Some(format!("Stopped: {}", if why.is_empty() { "API error".into() } else { why }))
         }
         EventKind::SessionStarted => Some("Session started".into()),
-        EventKind::SessionEnded => None,
+        EventKind::SessionEnded | EventKind::ToolStarted { .. } => None,
     }
 }

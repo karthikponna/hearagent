@@ -3,8 +3,9 @@
 A Mac app for people who run coding agents (Claude Code and Codex). It speaks short, human summaries when an agent needs approval, finishes, or stops with an error, and gives you a dashboard and a notch panel for sessions, usage, limits, spend, dev servers, actions and agent config. [hearagent.app](https://hearagent.app)
 
 - `core/`: Rust engine. Parses hook events, names sessions (worktree / project + branch), condenses the finished turn from the transcript, ranks what to play across sessions, installs hooks, talks to the backend, reads usage from local Claude Code and Codex session files, and finds local dev servers. Also the `hearagent-hook` CLI that agent hooks call.
-- `app/`: SwiftUI app: dashboard window, notch panel, menu bar menu, Google sign-in and playback. Talks to the engine through UniFFI.
-- `backend/`: Cloudflare Worker (TypeScript) with D1. Google sign-in, GPT-5 mini summaries, ElevenLabs voice (George), credits, and Dodo Payments subscriptions. Holds all API keys; the app never sees them.
+- `app/`: SwiftUI app: dashboard window, notch panel, menu bar menu, sign-in (Supabase Auth: Google and Apple) and playback. Talks to the engine through UniFFI.
+- `backend/`: Cloudflare Worker (TypeScript). Verifies Supabase sessions, writes GPT-5 mini summaries, voices them with ElevenLabs (George), spends credits, and runs Dodo Payments checkout and webhooks. Holds all API keys; the app never sees them.
+- `migrations/`: Supabase SQL (profiles, plans, subscriptions, credits). Paste into the Supabase SQL editor.
 
 ## Build the app
 

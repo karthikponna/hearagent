@@ -7,6 +7,8 @@ pub mod dispatcher;
 pub mod event;
 pub mod installer;
 pub mod location;
+pub mod rules;
 pub mod servers;
 pub mod speech;
+pub mod transcript;
 pub mod usage;

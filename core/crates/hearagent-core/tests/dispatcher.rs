@@ -10,6 +10,7 @@ fn ev(agent: Agent, sid: &str, project: &str, kind: EventKind) -> AgentEvent {
         cwd: format!("/work/{project}"),
         location: Location { project: project.into(), worktree: None, branch: None },
         kind,
+        extra: Default::default(),
     }
 }
 fn done(msg: &str) -> EventKind {

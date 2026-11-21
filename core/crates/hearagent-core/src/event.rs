@@ -40,6 +40,24 @@ pub enum EventKind {
     Finished { message: String, digest: Option<TurnDigest> },
     /// The turn ended because of an API error (rate limit, overload, auth).
     StoppedWithError { error: String, details: String, message: String },
+    /// A tool call is about to run (PreToolUse). Never spoken.
+    ToolStarted { tool: String, input: Value },
+}
+
+/// Details that only some events carry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EventExtra {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub transcript_path: String,
+    /// The prompt the user just sent (UserPromptSubmit).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
+    /// What a tool call acts on: a command, a file path, a URL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subject: String,
+    /// Set by the hook when it waits on the socket for an approval decision.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaits_decision: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,20 +68,31 @@ pub struct AgentEvent {
     #[serde(default)]
     pub location: Location,
     pub kind: EventKind,
+    #[serde(default, flatten)]
+    pub extra: EventExtra,
 }
 
 impl AgentEvent {
     /// Parses a raw hook payload. Returns `None` for events Hear Agent ignores.
     pub fn from_hook_payload(agent: Agent, payload: &Value) -> Option<AgentEvent> {
         let transcript = str_field(payload, "transcript_path");
+        let tool_name = str_field(payload, "tool_name");
+        let mut extra = EventExtra { transcript_path: transcript.clone(), ..EventExtra::default() };
         let kind = match str_field(payload, "hook_event_name").as_str() {
             "SessionStart" => EventKind::SessionStarted,
             "SessionEnd" => EventKind::SessionEnded,
-            "UserPromptSubmit" => EventKind::PromptSubmitted,
+            "UserPromptSubmit" => {
+                extra.prompt = str_field(payload, "prompt");
+                EventKind::PromptSubmitted
+            }
             "PermissionRequest" => {
-                let tool = str_field(payload, "tool_name");
-                let action = approval_action(&tool, payload.get("tool_input"));
-                EventKind::ApprovalNeeded { tool, action }
+                let action = approval_action(&tool_name, payload.get("tool_input"));
+                extra.subject = tool_subject(&tool_name, payload.get("tool_input"));
+                EventKind::ApprovalNeeded { tool: tool_name, action }
+            }
+            "PreToolUse" => {
+                extra.subject = tool_subject(&tool_name, payload.get("tool_input"));
+                EventKind::ToolStarted { tool: tool_name, input: payload.get("tool_input").cloned().unwrap_or(Value::Null) }
             }
             "Stop" => {
                 let digest = match agent {
@@ -90,8 +119,35 @@ impl AgentEvent {
             location: Location::detect(Path::new(&cwd)),
             cwd,
             kind,
+            extra,
         })
     }
+}
+
+/// What a tool call acts on, for display and for always-allow rules.
+pub fn tool_subject(tool: &str, input: Option<&Value>) -> String {
+    let get = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let subject = match tool {
+        "Bash" | "shell" | "exec_command" | "local_shell" | "Monitor" => get("command").or_else(|| get("cmd")).map(str::to_string).or_else(|| {
+            // Codex can send the command as an argv array.
+            input.and_then(|i| i.get("command")).and_then(Value::as_array).map(|parts| {
+                parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")
+            })
+        }),
+        "Edit" | "MultiEdit" | "Write" | "Read" => get("file_path").map(str::to_string),
+        "NotebookEdit" => get("notebook_path").map(str::to_string),
+        "Grep" | "Glob" => get("pattern").map(str::to_string),
+        "WebFetch" => get("url").map(str::to_string),
+        "WebSearch" => get("query").map(str::to_string),
+        "Task" | "Agent" => get("description").map(str::to_string),
+        "apply_patch" => get("command").and_then(|patch| {
+            patch.lines().find_map(|l| {
+                ["*** Update File: ", "*** Add File: ", "*** Delete File: "].iter().find_map(|p| l.strip_prefix(p)).map(|f| f.trim().to_string())
+            })
+        }),
+        _ => None,
+    };
+    subject.unwrap_or_default()
 }
 
 fn str_field(v: &Value, key: &str) -> String {

@@ -1,0 +1,160 @@
+/* Ribbon (meetribbon.app) — design tokens and signature effects, extracted from the live
+   Next.js + Tailwind v4 build. Plain CSS so it works with or without Tailwind.
+   Fonts: Instrument Sans Variable (npm i @fontsource-variable/instrument-sans),
+          Caveat 500/700 (npm i @fontsource/caveat), headline = system "serif" (Times / New York). */
+
+:root {
+  --rb-font-sans: "Instrument Sans Variable", "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --rb-font-serif: serif; /* the hero + "What is Ribbon?" h2 literally use font-family: serif */
+  --rb-font-hand: "Caveat", ui-rounded, cursive;
+  --rb-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* surfaces */
+  --rb-page: #f4f4f5;          /* body bg (zinc-100-ish) */
+  --rb-card: #fff;
+  --rb-sky: #5bb2ff;           /* hero fallback behind the illustration */
+  --rb-bento-art: linear-gradient(180deg, #f8fafc 0%, #e8f3ff 100%);
+  --rb-desktop: #1d1d1f;       /* interactive demo frame */
+
+  /* ink (Tailwind zinc) */
+  --rb-ink: oklch(14.1% .005 285.823);   /* zinc-950 */
+  --rb-ink-2: oklch(44.2% .017 285.786); /* zinc-600 body copy */
+  --rb-ink-3: oklch(70.5% .015 286.067); /* zinc-400 fine print */
+  --rb-line: oklch(92% .004 286.32);     /* zinc-200 */
+  --rb-ring: rgb(24 24 27 / .10);        /* ring-zinc-900/10 on cards */
+
+  /* the one accent: sky */
+  --rb-accent: oklch(58.8% .158 241.966);      /* sky-600 — nav Download button */
+  --rb-accent-hover: oklch(50% .134 242.749);  /* sky-700 — eyebrows, links */
+  --rb-accent-ring: oklch(68.5% .169 237.323); /* sky-500 — focused window border, tab underline */
+  --rb-sale: oklch(69.6% .17 162.48);          /* emerald-500 — discount chip */
+
+  --rb-radius-card: 1.5rem;    /* rounded-3xl bento */
+  --rb-radius-panel: 1.75rem;  /* video + placeholders */
+  --rb-radius-price: 28px;
+  --rb-ease-ui: cubic-bezier(.22, 1, .36, 1);
+  --rb-ease-hero: cubic-bezier(.16, 1, .3, 1);
+}
+
+body { background: var(--rb-page); color: var(--rb-ink); font-family: var(--rb-font-sans); -webkit-font-smoothing: antialiased; }
+
+/* ---------- eyebrow + section head ---------- */
+.rb-eyebrow { font-size: .75rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--rb-accent-hover); }
+.rb-h2 { margin-top: .5rem; font-size: clamp(1.875rem, 3vw, 2.25rem); font-weight: 600; letter-spacing: -.025em; text-wrap: balance; }
+.rb-sub { margin-top: .75rem; max-width: 36rem; font-size: 1rem; line-height: 1.75; color: var(--rb-ink-2); text-wrap: balance; }
+
+/* ---------- hero ---------- */
+.rb-hero { position: relative; min-height: 100vh; overflow: hidden; background: var(--rb-sky); margin-top: -5rem; }
+.rb-hero > img.rb-hero-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; user-select: none; }
+.rb-hero-inner { position: relative; z-index: 10; display: flex; flex-direction: column; align-items: center; text-align: center; padding: 8rem 1.5rem 0; max-width: 56rem; margin: 0 auto; }
+.rb-hero h1 {
+  font-family: var(--rb-font-serif); font-weight: 400; color: #fff; letter-spacing: -.025em; text-wrap: balance;
+  font-size: 3rem; line-height: 1;                 /* mobile */
+}
+@media (min-width: 768px)  { .rb-hero h1 { font-size: 4.5rem; } }
+@media (min-width: 1024px) { .rb-hero h1 { font-size: 5.5rem; line-height: 1.1; } }
+@media (min-width: 1536px) { .rb-hero h1 { font-size: 7rem; } .rb-hero-inner { max-width: 72rem; } }
+.rb-hero h1 em { font-style: italic; }            /* "…instead of <em>shrinking</em> them." */
+.rb-hero p { margin-top: 1.5rem; max-width: 42rem; color: #fff; font-size: 1.125rem; line-height: 1.625; text-wrap: pretty; }
+.rb-trust { display: flex; gap: .375rem; justify-content: center; font-size: .75rem; line-height: 1.6; color: rgb(255 255 255 / .75); }
+
+/* entrance */
+@keyframes rb-hero-rise { from { transform: translateY(18px); } to { transform: none; } }
+@keyframes rb-hero-fade-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+.rb-rise { animation: rb-hero-rise .9s var(--rb-ease-hero) backwards; }
+.rb-fade-rise { animation: rb-hero-fade-rise .8s var(--rb-ease-hero) backwards; } /* lede delay .25s, CTAs .4s */
+
+/* ---------- liquid-glass pill button (needs the SVG filter below in the DOM) ----------
+   <a class="rb-glass">
+     <span class="rb-glass__rim" aria-hidden="true"></span>
+     <span class="rb-glass__refract" aria-hidden="true"></span>
+     <span class="rb-glass__label"> Download for Mac</span>
+   </a> */
+.rb-glass { position: relative; isolation: isolate; display: inline-flex; align-items: center; justify-content: center; gap: .5rem; height: 3rem; padding: 0 1.75rem; border-radius: 999px; color: #fff; font-size: .875rem; font-weight: 500; letter-spacing: -.025em; background: transparent; transition: transform .3s; text-decoration: none; }
+.rb-glass:hover { transform: scale(1.05); }
+.rb-glass__rim { position: absolute; inset: 0; z-index: 0; border-radius: inherit; pointer-events: none;
+  box-shadow:
+    0 0 6px rgba(0,0,0,.03), 0 2px 6px rgba(0,0,0,.08),
+    inset 3px 3px .5px -3px rgba(0,0,0,.9), inset -3px -3px .5px -3px rgba(0,0,0,.85),
+    inset 1px 1px 1px -.5px rgba(0,0,0,.6), inset -1px -1px 1px -.5px rgba(0,0,0,.6),
+    inset 0 0 6px 6px rgba(0,0,0,.12), inset 0 0 2px 2px rgba(0,0,0,.06),
+    0 0 12px rgba(255,255,255,.15); }
+.rb-glass__refract { position: absolute; inset: 0; z-index: -1; border-radius: inherit; overflow: hidden; pointer-events: none; backdrop-filter: url("#ribbon-liquid-glass"); }
+.rb-glass__label { position: relative; z-index: 10; display: inline-flex; align-items: center; gap: .5rem; pointer-events: none; }
+/* Paired round play button: 48px white circle, sky-400 icon, shadow-lg, hover scale 1.05, active .96 */
+.rb-round { display: flex; width: 3rem; height: 3rem; align-items: center; justify-content: center; border-radius: 999px; background: #fff; color: oklch(74.6% .16 232.661); box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1); transition: transform .15s; }
+.rb-round:hover { transform: scale(1.05); } .rb-round:active { transform: scale(.96); }
+
+/* ---------- nav: floating pill at top → docks into a "notch" tab when scrolled ---------- */
+.rb-header { position: fixed; inset-inline: 0; z-index: 50; display: flex; justify-content: center; pointer-events: none; top: var(--promo-banner-h, 0px); transition: top .3s var(--rb-ease-ui); }
+.rb-nav { pointer-events: auto; display: flex; align-items: center; background: #fff; margin: 1.25rem 1rem 0; gap: .75rem; padding: .5rem; border-radius: 999px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 0 0 1px rgba(24,24,27,.05);
+  transform-origin: top; transition: border-radius .3s var(--rb-ease-ui), padding .3s var(--rb-ease-ui), gap .3s var(--rb-ease-ui), box-shadow .3s var(--rb-ease-ui), margin .3s var(--rb-ease-ui); }
+.rb-nav.is-docked { margin-top: 0; gap: .875rem; padding: .625rem .625rem .625rem .875rem; border-radius: 0 0 22px 22px;
+  box-shadow: 0 10px 28px rgba(0,0,0,.10), 0 0 0 1px rgba(24,24,27,.06); }
+.rb-nav a.rb-link { font-size: .75rem; font-weight: 500; color: oklch(55.6% 0 0); transition: color .15s; text-decoration: none; }
+.rb-nav a.rb-link:hover { color: oklch(20.5% 0 0); }
+.rb-nav-cta { display: inline-flex; align-items: center; gap: .375rem; border-radius: 999px; background: var(--rb-accent); color: #fff; padding: .5rem 1rem; font-size: .75rem; font-weight: 500;
+  box-shadow: inset 0 2px 0 rgba(255,255,255,.2), inset 0 -2px 0 rgba(0,0,0,.2); transition: background-color .15s; }
+.rb-nav-cta:hover { background: var(--rb-accent-hover); } .rb-nav-cta:active { transform: scale(.96); }
+
+/* ---------- bento feature card ---------- */
+.rb-bento { display: grid; grid-template-columns: 1fr; gap: 1rem; }
+@media (min-width: 1024px) { .rb-bento { grid-template-columns: repeat(6, 1fr); } .rb-span-3 { grid-column: span 3; } .rb-span-2 { grid-column: span 2; } }
+.rb-card { position: relative; display: flex; flex-direction: column; overflow: hidden; border-radius: var(--rb-radius-card); background: var(--rb-card); box-shadow: 0 1px 2px rgb(0 0 0 / .05), 0 0 0 1px var(--rb-ring); }
+.rb-card__art { position: relative; height: 14rem; flex-shrink: 0; overflow: hidden; background: var(--rb-bento-art); }
+.rb-card__art::before { content: ""; position: absolute; inset: 0; opacity: .18; background: var(--rb-art-wash, none) center / cover; pointer-events: none; } /* soft pastel abstract photo wash */
+.rb-card__body { border-top: 1px solid rgb(24 24 27 / .05); padding: 1.75rem; }
+.rb-card__kicker { font-size: 11px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--rb-accent-hover); }
+.rb-card__title { margin-top: .5rem; font-size: 1.25rem; font-weight: 600; letter-spacing: -.025em; }
+.rb-card__text { margin-top: .5rem; max-width: 36rem; font-size: .875rem; line-height: 1.5rem; color: var(--rb-ink-2); }
+/* mini macOS window used inside bento art */
+.rb-win { display: flex; flex-direction: column; overflow: hidden; border-radius: .75rem; border: 1px solid var(--rb-line); background: #fff; box-shadow: 0 4px 6px -1px rgb(0 0 0 / .1); }
+.rb-win.is-focused { border-color: var(--rb-accent-ring); box-shadow: 0 0 0 2px color-mix(in oklab, var(--rb-accent-ring) 50%, transparent); }
+.rb-win__bar { display: flex; height: 1.5rem; align-items: center; gap: .25rem; padding: 0 .375rem; border-bottom: 1px solid rgb(24 24 27 / .05); background: #fafafa; font-size: 10px; color: oklch(55.2% .016 285.938); }
+.rb-win__bar i { width: .375rem; height: .375rem; border-radius: 50%; background: #ff5f57; } .rb-win__bar i:nth-child(2) { background: #febc2e; } .rb-win__bar i:nth-child(3) { background: #28c840; }
+/* inline keycap used in card copy: ⌃ ⌥ R */
+.rb-kbd { display: inline-grid; place-items: center; min-width: 1.25rem; height: 1.25rem; padding: 0 .25rem; border-radius: 999px; border: 1px solid var(--rb-line); background: #fff; font-size: 10px; font-weight: 600; color: var(--rb-ink); vertical-align: middle; }
+
+/* ---------- hand-written callout ("turn ribbon on" + drawn arrow) ---------- */
+.rb-hand { font-family: var(--rb-font-hand); font-weight: 700; font-size: 42px; line-height: 1; color: var(--rb-ink); transform: rotate(-7deg); }
+@keyframes rb-ribbon-draw { from { stroke-dashoffset: 180px; } to { stroke-dashoffset: 0; } }
+.rb-draw { stroke-dasharray: 180; animation: rb-ribbon-draw 1.1s forwards; }
+
+/* ---------- pricing card ---------- */
+.rb-price { border-radius: var(--rb-radius-price); background: #fff; padding: 2rem; box-shadow: 0 1px 2px rgb(0 0 0 / .05), 0 0 0 1px var(--rb-ring); max-width: 36rem; margin: 0 auto; }
+.rb-seg { display: flex; border-radius: 999px; background: oklch(96.7% .001 286.375); padding: .25rem; box-shadow: 0 0 0 1px rgb(24 24 27 / .05); }
+.rb-seg button { flex: 1; border: 0; border-radius: 999px; padding: .5rem .75rem; font: 500 .875rem/1.25 var(--rb-font-sans); background: none; color: var(--rb-ink-2); transition: all .15s; }
+.rb-seg button[aria-selected="true"] { background: #fff; color: var(--rb-ink); box-shadow: 0 1px 2px rgb(0 0 0 / .05); }
+.rb-amount { font-size: 3rem; font-weight: 600; letter-spacing: -.025em; } .rb-was { font-size: 1.125rem; color: var(--rb-ink-3); text-decoration: line-through; }
+.rb-btn-dark { display: inline-flex; height: 3rem; align-items: center; justify-content: center; border-radius: 999px; background: var(--rb-ink); color: #fff; padding: 0 1.25rem; font-size: .875rem; font-weight: 600; transition: background-color .15s, transform .15s; }
+.rb-btn-dark:hover { background: oklch(27.4% .006 286.033); } .rb-btn-dark:active { transform: scale(.98); }
+.rb-btn-light { display: inline-flex; height: 3rem; align-items: center; justify-content: center; gap: .5rem; border-radius: 999px; border: 1px solid var(--rb-line); background: #fff; color: oklch(27.4% .006 286.033); padding: 0 1.25rem; font-size: .875rem; font-weight: 500; }
+.rb-code { display: inline-flex; align-items: center; gap: .375rem; border-radius: 999px; border: 1px dashed rgb(52 211 153 / .7); background: rgb(236 253 245 / .5); padding: .125rem .125rem .125rem .75rem; font: 600 .875rem var(--rb-font-mono); letter-spacing: .14em; }
+
+/* ---------- badge marquee (footer "featured on") ---------- */
+@keyframes rb-featured-scroll { from { transform: translateZ(0); } to { transform: translate(-50%); } }
+.rb-marquee { overflow: hidden; padding-block: 4px; mask-image: linear-gradient(90deg, #0000, #000 28px calc(100% - 28px), #0000); }
+.rb-marquee__track { display: flex; width: max-content; animation: rb-featured-scroll 50s linear infinite; will-change: transform; }
+.rb-marquee:hover .rb-marquee__track, .rb-marquee:focus-within .rb-marquee__track, .rb-marquee[data-paused] .rb-marquee__track { animation-play-state: paused; }
+.rb-marquee__set { display: flex; flex-shrink: 0; align-items: center; gap: 2rem; padding-right: 2rem; margin: 0; list-style: none; }
+
+/* ---------- floating mascot (bottom-right) ---------- */
+.rb-mascot { position: fixed; right: 1.5rem; bottom: 1.5rem; z-index: 40; display: flex; width: 5.5rem; height: 5.5rem; align-items: center; justify-content: center; border-radius: 1.35rem; background: rgb(255 255 255 / .7); backdrop-filter: blur(8px); box-shadow: 0 18px 40px -18px rgba(14,98,180,.85); outline: 2px solid rgb(255 255 255 / .8); }
+
+@media (prefers-reduced-motion: reduce) {
+  .rb-rise, .rb-fade-rise { animation: none; }
+  .rb-marquee { mask-image: none; } .rb-marquee__track { width: auto; animation: none; display: block; }
+  .rb-marquee__set { flex-wrap: wrap; gap: .75rem 1rem; padding-right: 0; } .rb-marquee__set[aria-hidden] { display: none; }
+}
+
+/* SVG filter for the liquid-glass refraction — render once, anywhere in <body>:
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <filter id="ribbon-liquid-glass" x="0%" y="0%" width="100%" height="100%" color-interpolation-filters="sRGB">
+    <feTurbulence type="fractalNoise" baseFrequency="0.05 0.05" numOctaves="1" seed="1" result="turbulence"/>
+    <feGaussianBlur in="turbulence" stdDeviation="2" result="blurredNoise"/>
+    <feDisplacementMap in="SourceGraphic" in2="blurredNoise" scale="70" xChannelSelector="R" yChannelSelector="B" result="displaced"/>
+    <feGaussianBlur in="displaced" stdDeviation="4" result="finalBlur"/>
+    <feComposite in="finalBlur" in2="finalBlur" operator="over"/>
+  </filter>
+</defs></svg> */

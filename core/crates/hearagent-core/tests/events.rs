@@ -83,8 +83,27 @@ fn prompt_submit_and_session_events() {
 }
 
 #[test]
+fn pre_tool_use_carries_the_call() {
+    let payload = json!({
+        "hook_event_name": "PreToolUse", "session_id": "s", "cwd": "/w/app",
+        "tool_name": "Edit", "tool_input": {"file_path": "/w/app/src/page.tsx", "old_string": "a", "new_string": "b"}
+    });
+    let ev = AgentEvent::from_hook_payload(Agent::ClaudeCode, &payload).unwrap();
+    assert!(matches!(ev.kind, EventKind::ToolStarted { ref tool, .. } if tool == "Edit"));
+    assert_eq!(ev.extra.subject, "/w/app/src/page.tsx");
+}
+
+#[test]
+fn approval_and_prompt_keep_their_details() {
+    let ev = event(Agent::ClaudeCode, "claude_permission.json");
+    assert!(!ev.extra.subject.is_empty());
+    let prompt = AgentEvent::from_hook_payload(Agent::ClaudeCode, &json!({"hook_event_name": "UserPromptSubmit", "prompt": "Fix the tests"})).unwrap();
+    assert_eq!(prompt.extra.prompt, "Fix the tests");
+}
+
+#[test]
 fn mid_run_events_are_ignored() {
-    for name in ["PreToolUse", "PostToolUse", "PostToolUseFailure", "Notification", "SubagentStop"] {
+    for name in ["PostToolUse", "PostToolUseFailure", "Notification", "SubagentStop"] {
         let mut payload = fixture("claude_stop.json");
         payload["hook_event_name"] = json!(name);
         assert!(AgentEvent::from_hook_payload(Agent::ClaudeCode, &payload).is_none(), "{name}");

@@ -58,6 +58,7 @@ pub struct SessionUsage {
     pub messages: u32,
     pub started_ms: i64,
     pub last_ms: i64,
+    pub transcript_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -68,6 +69,9 @@ pub struct DayUsage {
     pub codex_tokens: u64,
     pub cost_usd: f64,
     pub sessions: u32,
+    /// Prompt tokens served from cache, and all prompt tokens (fresh, cached, written).
+    pub cache_read_tokens: u64,
+    pub prompt_tokens: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -320,6 +324,7 @@ fn parse_claude(path: &Path) -> Option<FileSummary> {
             messages: msgs.len() as u32,
             started_ms: if started == i64::MAX { last } else { started },
             last_ms: last,
+            transcript_path: path.to_string_lossy().into_owned(),
         },
         msgs,
         codex_limits: None,
@@ -432,6 +437,7 @@ fn parse_codex(path: &Path) -> Option<FileSummary> {
             messages: msgs.len() as u32,
             started_ms: if started == i64::MAX { last } else { started },
             last_ms: last,
+            transcript_path: path.to_string_lossy().into_owned(),
         },
         msgs,
         codex_limits: limits,
@@ -474,7 +480,7 @@ fn build_report(files: Vec<FileSummary>, o: ReportOptions) -> UsageReport {
     let first_day = today - (REPORT_DAYS - 1);
 
     let mut days: Vec<DayUsage> = (first_day..=today)
-        .map(|d| DayUsage { day: format_day(d), claude_tokens: 0, codex_tokens: 0, cost_usd: 0.0, sessions: 0 })
+        .map(|d| DayUsage { day: format_day(d), claude_tokens: 0, codex_tokens: 0, cost_usd: 0.0, sessions: 0, cache_read_tokens: 0, prompt_tokens: 0 })
         .collect();
     let mut heatmap = vec![0u32; 7 * 24];
     let mut claude_msgs: Vec<(i64, u64)> = Vec::new();
@@ -498,6 +504,8 @@ fn build_report(files: Vec<FileSummary>, o: ReportOptions) -> UsageReport {
                     Agent::Codex => slot.codex_tokens += msg.tokens.total(),
                 }
                 slot.cost_usd += msg.cost;
+                slot.cache_read_tokens += msg.tokens.cache_read;
+                slot.prompt_tokens += msg.tokens.input + msg.tokens.cache_read + msg.tokens.cache_write;
                 if counted_days.insert(d) {
                     slot.sessions += 1;
                 }

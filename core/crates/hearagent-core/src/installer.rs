@@ -9,8 +9,13 @@ use std::path::{Path, PathBuf};
 const MARKER: &str = "hearagent-hook";
 /// Entries written before the rename are still recognised so they get replaced.
 const LEGACY_MARKERS: &[&str] = &["murmur-hook"];
-const CLAUDE_EVENTS: &[&str] = &["SessionStart", "SessionEnd", "UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure"];
-const CODEX_EVENTS: &[&str] = &["UserPromptSubmit", "PermissionRequest", "Stop"];
+const CLAUDE_EVENTS: &[&str] = &["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop", "StopFailure"];
+const CODEX_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop"];
+
+/// How long the hook waits for an answer from the notch. Claude Code shows its own
+/// prompt alongside the hook, so it can wait long; Codex holds its prompt until the hook returns.
+pub const CLAUDE_APPROVAL_WAIT_SECS: u64 = 590;
+pub const CODEX_APPROVAL_WAIT_SECS: u64 = 115;
 
 pub fn config_path(agent: Agent, home: &Path) -> PathBuf {
     match agent {
@@ -41,13 +46,42 @@ fn hook_command(agent: Agent, hook_binary: &Path) -> String {
     format!("'{quoted}' {arg}")
 }
 
-fn hook_entry(agent: Agent, hook_binary: &Path) -> Value {
+fn hook_entry(agent: Agent, event: &str, hook_binary: &Path) -> Value {
     let command = hook_command(agent, hook_binary);
-    match agent {
+    match (agent, event) {
+        // Waits on the socket so an answer from the notch can allow or deny the call.
+        (_, "PermissionRequest") => {
+            let wait = if agent == Agent::ClaudeCode { CLAUDE_APPROVAL_WAIT_SECS } else { CODEX_APPROVAL_WAIT_SECS };
+            json!({ "type": "command", "command": command, "timeout": wait + 10 })
+        }
         // async: Claude Code continues without waiting for the hook.
-        Agent::ClaudeCode => json!({ "type": "command", "command": command, "async": true }),
-        Agent::Codex => json!({ "type": "command", "command": command, "timeout": 5 }),
+        (Agent::ClaudeCode, _) => json!({ "type": "command", "command": command, "async": true }),
+        (Agent::Codex, _) => json!({ "type": "command", "command": command, "timeout": 5 }),
     }
+}
+
+/// True when hooks are installed but predate an event Hear Agent now listens to.
+pub fn needs_upgrade(agent: Agent, home: &Path) -> bool {
+    let Ok(root) = load(&config_path(agent, home)) else { return false };
+    if !installed_in(&root) {
+        return false;
+    }
+    let hooks = root.get("hooks").and_then(Value::as_object);
+    events(agent).iter().any(|event| {
+        let ours = hooks
+            .and_then(|h| h.get(*event))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|g| g.get("hooks")?.as_array())
+            .flatten()
+            .find(|h| is_ours(h))
+            .cloned();
+        match ours {
+            None => true,
+            Some(h) => *event == "PermissionRequest" && h.get("async").and_then(Value::as_bool) == Some(true),
+        }
+    })
 }
 
 fn load(path: &Path) -> io::Result<Map<String, Value>> {
@@ -115,7 +149,7 @@ pub fn install(agent: Agent, home: &Path, hook_binary: &Path) -> io::Result<Path
     for event in events(agent) {
         let groups = hooks.entry(event.to_string()).or_insert_with(|| Value::Array(vec![]));
         if let Value::Array(groups) = groups {
-            groups.push(json!({ "hooks": [hook_entry(agent, hook_binary)] }));
+            groups.push(json!({ "hooks": [hook_entry(agent, event, hook_binary)] }));
         }
     }
     save(&path, &root)?;

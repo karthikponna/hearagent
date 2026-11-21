@@ -8,6 +8,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 export CARGO_TARGET_DIR="$ROOT/core/target"
+# Match the app's deployment target (project.yml), so the library runs on every macOS the app supports.
+export MACOSX_DEPLOYMENT_TARGET=14.0
 OUT="$CARGO_TARGET_DIR/release"
 
 echo "==> cargo build (release)"

@@ -12,6 +12,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply hearagent --remote"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.2",
     "hono": "^4.13.19",
     "openai": "^7.57.0"
   },

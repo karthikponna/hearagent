@@ -5,14 +5,17 @@
 //! the engine from inside a callback.
 
 use hearagent_core::backend::{Account, Backend, BackendError, Credits, Renderer};
-use hearagent_core::bus::{default_socket_path, EventServer};
-use hearagent_core::dispatcher::{Dispatcher, DispatcherConfig, ReadySpeech, SessionInfo, SessionStatus};
-use hearagent_core::event::{Agent, AgentEvent};
+use hearagent_core::bus::{default_socket_path, BusHandler, Decision, EventServer, Reply};
+use hearagent_core::dispatcher::{Dispatcher, DispatcherConfig, PendingApproval, ReadySpeech, SessionInfo, SessionStatus};
+use hearagent_core::event::{Agent, AgentEvent, EventKind};
 use hearagent_core::installer;
+use hearagent_core::rules::{self, AllowRule};
+use hearagent_core::transcript::{self, ChatRole, Todo, TodoStatus};
 use hearagent_core::{servers, usage};
 use hearagent_core::speech::{SpeechKind, SpeechRequest};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 uniffi::setup_scaffolding!();
@@ -42,6 +45,39 @@ pub struct HearUtterance {
     pub audio: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HearTodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HearTodo {
+    pub id: String,
+    pub content: String,
+    pub status: HearTodoStatus,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HearActivity {
+    pub tool: String,
+    /// "Edit app/page.tsx", "Bash pnpm test".
+    pub line: String,
+    pub at_ms: u64,
+}
+
+/// A permission request waiting for an answer from the dashboard or notch.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HearPendingApproval {
+    pub id: u64,
+    pub tool: String,
+    /// The command, file or URL the call acts on.
+    pub subject: String,
+    pub action: String,
+    pub at_ms: u64,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct HearSession {
     pub key: String,
@@ -52,6 +88,42 @@ pub struct HearSession {
     pub last_update: String,
     pub last_event_ms: u64,
     pub pinned: bool,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub last_prompt: String,
+    pub last_message: String,
+    pub activity: Option<HearActivity>,
+    pub todos: Vec<HearTodo>,
+    pub pending: Option<HearPendingApproval>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HearDecision {
+    Allow,
+    Deny,
+    /// Leave it to the agent's own prompt in the terminal.
+    Ask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HearAllowRule {
+    pub tool: String,
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HearChatRole {
+    User,
+    Assistant,
+    Tools,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HearChatItem {
+    pub role: HearChatRole,
+    pub text: String,
+    pub tools: Vec<String>,
+    pub ts_ms: i64,
 }
 
 /// What the backend last said about the user's ability to hear updates.
@@ -68,11 +140,15 @@ pub enum HearAccountState {
 pub struct HearSubscription {
     pub status: String,
     pub active: bool,
+    pub plan_id: String,
     pub plan_name: String,
     pub credits_total: i64,
     pub credits_used: i64,
     pub credits_remaining: i64,
+    /// When credits next refill.
     pub period_end: Option<String>,
+    /// When the plan renews; none for lifetime.
+    pub renews_at: Option<String>,
     pub cancel_at_period_end: bool,
 }
 
@@ -86,8 +162,14 @@ pub struct HearAccount {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct HearSignIn {
     pub url: String,
-    pub state: String,
     pub verifier: String,
+}
+
+/// Supabase Auth providers the app offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HearAuthProvider {
+    Google,
+    Apple,
 }
 
 #[derive(Debug, uniffi::Error)]
@@ -200,6 +282,7 @@ pub struct HearSessionUsage {
     pub messages: u32,
     pub started_ms: i64,
     pub last_ms: i64,
+    pub transcript_path: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -209,6 +292,8 @@ pub struct HearDayUsage {
     pub codex_tokens: u64,
     pub cost_usd: f64,
     pub sessions: u32,
+    pub cache_read_tokens: u64,
+    pub prompt_tokens: u64,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -302,12 +387,21 @@ pub fn usage_report(utc_offset_seconds: i32, claude_five_hour_limit: u64, claude
                 messages: s.messages,
                 started_ms: s.started_ms,
                 last_ms: s.last_ms,
+                transcript_path: s.transcript_path,
             })
             .collect(),
         days: r
             .days
             .into_iter()
-            .map(|d| HearDayUsage { day: d.day, claude_tokens: d.claude_tokens, codex_tokens: d.codex_tokens, cost_usd: d.cost_usd, sessions: d.sessions })
+            .map(|d| HearDayUsage {
+                day: d.day,
+                claude_tokens: d.claude_tokens,
+                codex_tokens: d.codex_tokens,
+                cost_usd: d.cost_usd,
+                sessions: d.sessions,
+                cache_read_tokens: d.cache_read_tokens,
+                prompt_tokens: d.prompt_tokens,
+            })
             .collect(),
         heatmap: r.heatmap,
         claude_five_hour: window(r.claude_five_hour),
@@ -348,11 +442,65 @@ pub fn stop_dev_server(pid: u32) -> bool {
     servers::stop(pid)
 }
 
+/// True when the installed hooks are missing events this version listens to.
+#[uniffi::export]
+pub fn hooks_need_upgrade(agent: AgentKind) -> bool {
+    installer::needs_upgrade(agent.into(), &home_dir())
+}
+
+/// A session's conversation, oldest first. Blocking; call off the main thread.
+#[uniffi::export]
+pub fn chat_transcript(path: String, agent: AgentKind) -> Vec<HearChatItem> {
+    transcript::chat(std::path::Path::new(&path), agent.into())
+        .into_iter()
+        .map(|i| HearChatItem {
+            role: match i.role {
+                ChatRole::User => HearChatRole::User,
+                ChatRole::Assistant => HearChatRole::Assistant,
+                ChatRole::Tools => HearChatRole::Tools,
+            },
+            text: i.text,
+            tools: i.tools,
+            ts_ms: i.ts_ms,
+        })
+        .collect()
+}
+
+/// The task list at the end of a Claude transcript.
+#[uniffi::export]
+pub fn transcript_todos(path: String) -> Vec<HearTodo> {
+    transcript::todos(std::path::Path::new(&path)).into_iter().map(Into::into).collect()
+}
+
+/// The rule "Always allow" saves for a request.
+#[uniffi::export]
+pub fn suggest_allow_rule(tool: String, subject: String, cwd: String) -> HearAllowRule {
+    let r = rules::suggest(&tool, &subject, &cwd);
+    HearAllowRule { tool: r.tool, pattern: r.pattern }
+}
+
+impl From<Todo> for HearTodo {
+    fn from(t: Todo) -> Self {
+        HearTodo {
+            id: t.id,
+            content: t.content,
+            status: match t.status {
+                TodoStatus::Pending => HearTodoStatus::Pending,
+                TodoStatus::InProgress => HearTodoStatus::InProgress,
+                TodoStatus::Completed => HearTodoStatus::Completed,
+            },
+        }
+    }
+}
+
 #[uniffi::export(with_foreign)]
 pub trait EngineListener: Send + Sync {
     fn speak(&self, utterance: HearUtterance);
     fn sessions_changed(&self, sessions: Vec<HearSession>);
     fn account_state_changed(&self, state: HearAccountState);
+    /// The Supabase session as JSON whenever it changes (sign-in, refresh), or none on sign-out.
+    /// The app keeps it in the Keychain and hands it back with `set_session` on launch.
+    fn session_changed(&self, session: Option<String>);
 }
 
 #[derive(uniffi::Object)]
@@ -362,6 +510,30 @@ pub struct Engine {
     backend: Arc<Backend>,
     renderer: Arc<dyn Renderer>,
     server: Mutex<Option<EventServer>>,
+    /// Hooks waiting for an approval decision, by approval id.
+    replies: Mutex<HashMap<u64, Arc<Reply>>>,
+    allow_rules: Mutex<Vec<AllowRule>>,
+}
+
+/// Routes bus traffic to the engine without keeping it alive.
+struct Bus(Weak<Engine>);
+
+impl BusHandler for Bus {
+    fn event(&self, event: AgentEvent) {
+        if let Some(engine) = self.0.upgrade() {
+            engine.handle(event);
+        }
+    }
+    fn approval(&self, event: AgentEvent, reply: Arc<Reply>) {
+        if let Some(engine) = self.0.upgrade() {
+            engine.handle_approval(event, reply);
+        }
+    }
+    fn approval_closed(&self, reply_id: u64) {
+        if let Some(engine) = self.0.upgrade() {
+            engine.approval_closed(reply_id);
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -371,20 +543,15 @@ fn now_ms() -> u64 {
 #[uniffi::export]
 impl Engine {
     #[uniffi::constructor]
-    pub fn new(listener: Arc<dyn EngineListener>, api_base_url: String) -> Arc<Engine> {
-        let backend = Arc::new(Backend::new(&api_base_url));
+    pub fn new(listener: Arc<dyn EngineListener>, api_base_url: String, supabase_url: String, supabase_key: String) -> Arc<Engine> {
+        let backend = Arc::new(Backend::new(&api_base_url, &supabase_url, &supabase_key));
         Engine::build(listener, backend.clone(), backend)
     }
 
     /// Starts listening for hook events. Returns the socket path in use.
     pub fn start(self: Arc<Self>, socket_path: Option<String>) -> Result<String, HearError> {
         let path = socket_path.map(PathBuf::from).unwrap_or_else(default_socket_path);
-        let engine = Arc::downgrade(&self);
-        let server = EventServer::start(&path, move |event| {
-            if let Some(engine) = engine.upgrade() {
-                engine.handle(event);
-            }
-        })?;
+        let server = EventServer::start_with(&path, Arc::new(Bus(Arc::downgrade(&self))))?;
         *self.server.lock().unwrap() = Some(server);
         Ok(path.to_string_lossy().into_owned())
     }
@@ -393,17 +560,21 @@ impl Engine {
         self.server.lock().unwrap().take();
     }
 
-    pub fn set_token(&self, token: Option<String>) {
-        self.backend.set_token(token);
+    /// Restores the session JSON saved from `session_changed`.
+    pub fn set_session(&self, session: Option<String>) {
+        self.backend.set_session(session);
     }
 
-    pub fn start_sign_in(&self) -> HearSignIn {
-        let s = self.backend.start_sign_in();
-        HearSignIn { url: s.url, state: s.state, verifier: s.verifier }
+    pub fn start_sign_in(&self, provider: HearAuthProvider) -> HearSignIn {
+        let s = self.backend.start_sign_in(match provider {
+            HearAuthProvider::Google => "google",
+            HearAuthProvider::Apple => "apple",
+        });
+        HearSignIn { url: s.url, verifier: s.verifier }
     }
 
-    /// Completes sign-in; returns the session token for the Keychain.
-    pub fn finish_sign_in(&self, code: String, verifier: String) -> Result<String, HearError> {
+    /// Completes sign-in with the code from `hearagent://auth?code=…`; the new session arrives via `session_changed`.
+    pub fn finish_sign_in(&self, code: String, verifier: String) -> Result<(), HearError> {
         Ok(self.backend.finish_sign_in(&code, &verifier)?)
     }
 
@@ -432,8 +603,9 @@ impl Engine {
         Ok(account.into())
     }
 
-    pub fn checkout_url(&self) -> Result<String, HearError> {
-        Ok(self.backend.checkout_url()?)
+    /// `plan`: "monthly", "yearly" or "lifetime".
+    pub fn checkout_url(&self, plan: String) -> Result<String, HearError> {
+        Ok(self.backend.checkout_url(&plan)?)
     }
 
     pub fn portal_url(&self) -> Result<String, HearError> {
@@ -489,18 +661,90 @@ impl Engine {
     pub fn sessions(&self) -> Vec<HearSession> {
         self.dispatcher.lock().unwrap().sessions().into_iter().map(Into::into).collect()
     }
+
+    /// Answers a waiting permission request. Returns false when its hook is already gone.
+    pub fn decide(&self, approval_id: u64, decision: HearDecision) -> bool {
+        let reply = self.replies.lock().unwrap().remove(&approval_id);
+        let sent = reply.is_some_and(|r| {
+            r.send(&match decision {
+                HearDecision::Allow => Decision::Allow,
+                HearDecision::Deny => Decision::Deny { message: String::new() },
+                HearDecision::Ask => Decision::Ask,
+            })
+        });
+        let changed = self.dispatcher.lock().unwrap().clear_pending(approval_id, decision != HearDecision::Ask, now_ms());
+        if changed {
+            self.notify_sessions();
+        }
+        sent
+    }
+
+    /// Requests matching one of these are allowed without asking.
+    pub fn set_allow_rules(&self, rules: Vec<HearAllowRule>) {
+        *self.allow_rules.lock().unwrap() = rules.into_iter().map(|r| AllowRule { tool: r.tool, pattern: r.pattern }).collect();
+    }
 }
 
 impl Engine {
     /// Engine with a custom renderer (tests use a fake backend).
     pub fn build(listener: Arc<dyn EngineListener>, backend: Arc<Backend>, renderer: Arc<dyn Renderer>) -> Arc<Engine> {
+        let sessions = listener.clone();
+        backend.on_session_changed(Box::new(move |session| sessions.session_changed(session)));
         Arc::new(Engine {
             dispatcher: Arc::new(Mutex::new(Dispatcher::new(DispatcherConfig::default()))),
             listener,
             backend,
             renderer,
             server: Mutex::new(None),
+            replies: Mutex::new(HashMap::new()),
+            allow_rules: Mutex::new(Vec::new()),
         })
+    }
+
+    fn notify_sessions(&self) {
+        let sessions = self.dispatcher.lock().unwrap().sessions();
+        self.listener.sessions_changed(sessions.into_iter().map(Into::into).collect());
+    }
+
+    fn handle_approval(self: &Arc<Self>, event: AgentEvent, reply: Arc<Reply>) {
+        let EventKind::ApprovalNeeded { tool, action } = &event.kind else {
+            self.handle(event);
+            return;
+        };
+        let subject = event.extra.subject.clone();
+        if rules::any_matches(&self.allow_rules.lock().unwrap(), tool, &subject, &event.cwd) {
+            reply.send(&Decision::Allow);
+            return;
+        }
+        let pending = PendingApproval { id: reply.id, tool: tool.clone(), subject, action: action.clone(), at_ms: now_ms() };
+        let key = Dispatcher::session_key(event.agent, &event.session_id);
+        self.replies.lock().unwrap().insert(reply.id, reply);
+        let request = {
+            let mut d = self.dispatcher.lock().unwrap();
+            let request = d.ingest(event, now_ms());
+            d.set_pending(&key, pending);
+            request
+        };
+        self.notify_sessions();
+        self.speak_later(request);
+    }
+
+    fn approval_closed(&self, reply_id: u64) {
+        let waiting = self.replies.lock().unwrap().remove(&reply_id).is_some();
+        if waiting && self.dispatcher.lock().unwrap().clear_pending(reply_id, false, now_ms()) {
+            self.notify_sessions();
+        }
+    }
+
+    fn speak_later(self: &Arc<Self>, request: Option<SpeechRequest>) {
+        if let Some(request) = request {
+            let engine = Arc::downgrade(self);
+            std::thread::spawn(move || {
+                if let Some(engine) = engine.upgrade() {
+                    engine.render(request);
+                }
+            });
+        }
     }
 
     fn handle(self: &Arc<Self>, event: AgentEvent) {
@@ -599,6 +843,13 @@ impl From<SessionInfo> for HearSession {
             last_update: s.last_update,
             last_event_ms: s.last_event_ms,
             pinned: s.pinned,
+            session_id: s.session_id,
+            transcript_path: s.transcript_path,
+            last_prompt: s.last_prompt,
+            last_message: s.last_message,
+            activity: s.activity.map(|a| HearActivity { tool: a.tool, line: a.line, at_ms: a.at_ms }),
+            todos: s.todos.into_iter().map(Into::into).collect(),
+            pending: s.pending.map(|p| HearPendingApproval { id: p.id, tool: p.tool, subject: p.subject, action: p.action, at_ms: p.at_ms }),
         }
     }
 }
@@ -611,11 +862,13 @@ impl From<Account> for HearAccount {
             subscription: a.subscription.map(|s| HearSubscription {
                 status: s.status,
                 active: s.active,
+                plan_id: s.plan_id,
                 plan_name: s.plan_name,
                 credits_total: s.credits_total,
                 credits_used: s.credits_used,
                 credits_remaining: s.credits_remaining,
                 period_end: s.period_end,
+                renews_at: s.renews_at,
                 cancel_at_period_end: s.cancel_at_period_end,
             }),
         }

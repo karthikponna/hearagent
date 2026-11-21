@@ -14,6 +14,13 @@ struct HearAgentApp: App {
             DispatchQueue.main.async { SnapshotRenderer.renderAll(model: model, request: request) }
             return
         }
+        if SnapshotRenderer.previewRequested() {
+            let model = AppModel(preferences: Preferences(defaults: UserDefaults(suiteName: "hearagent-preview")!), listen: false)
+            model.preferences.showMenuBarIcon = false
+            SnapshotRenderer.loadPreview(model: model)
+            _model = State(initialValue: model)
+            return
+        }
         #endif
         LoginItem.handleCommandLine()
         SingleInstance.exitIfAlreadyRunning()
@@ -30,14 +37,14 @@ struct HearAgentApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
-        .defaultSize(width: 1240, height: 800)
+        .defaultSize(width: 1380, height: 880)
 
         MenuBarExtra(isInserted: Binding(get: { model.preferences.showMenuBarIcon }, set: { model.preferences.showMenuBarIcon = $0 })) {
             MenuBarMenu(model: model)
         } label: {
             Image(systemName: menuBarSymbol)
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
     }
 
     private var menuBarSymbol: String {
@@ -77,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let notch = NotchController(model: model)
             notch.start()
             self.notch = notch
+            Updates.showWhatsNewIfUpdated()
         }
     }
 
@@ -96,25 +104,46 @@ private struct MenuBarMenu: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                BrandMark(size: 22)
-                Text("Hear Agent").font(.headline)
-                Spacer()
-                Text("\(model.sessions.count) live").font(.caption).foregroundStyle(.secondary)
+        @Bindable var prefs = model.preferences
+        Button("Open Dashboard") { AppDelegate.showDashboard?() }
+            .keyboardShortcut("d")
+
+        Divider()
+        if let account = model.account {
+            Text("Signed in · \(account.email)")
+            if let sub = account.subscription {
+                Text("Plan: \(sub.planName)\(sub.active ? "" : " (\(sub.status))")")
+                if !sub.active { Button("Renew plan…") { model.openCheckout() } }
+            } else {
+                Text("Plan: none")
+                Button("Choose a plan…") { model.openCheckout() }
             }
-            if !model.lastSpoken.isEmpty {
-                Text(model.lastSpoken).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-            }
-            Divider()
-            Toggle("Mute spoken updates", isOn: $model.muted)
-            Button("Open dashboard") { AppDelegate.showDashboard?() }
-                .keyboardShortcut("d")
-            Button("Quit Hear Agent") { NSApplication.shared.terminate(nil) }
-                .keyboardShortcut("q")
+        } else {
+            Text("Not signed in")
+            Button("Sign in…") { open(.account) }
         }
-        .padding(14)
-        .frame(width: 280)
+
+        Divider()
+        Text("Hear Agent v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+        Button("Check for Updates…") { Updates.check(apiBaseURL: model.preferences.apiBaseURL) }
+
+        Divider()
+        Toggle("Mute Updates", isOn: $model.muted)
+        Toggle("Hide Notch", isOn: Binding(get: { !prefs.notchEnabled }, set: { prefs.notchEnabled = !$0 }))
+
+        Divider()
+        Button("Settings…") { open(.general) }
+            .keyboardShortcut(",")
+
+        Divider()
+        Button("Quit Hear Agent") { NSApplication.shared.terminate(nil) }
+            .keyboardShortcut("q")
+    }
+
+    private func open(_ pane: SettingsPane) {
+        model.settingsPane = pane
+        model.page = .settings
+        AppDelegate.showDashboard?()
     }
 }
 

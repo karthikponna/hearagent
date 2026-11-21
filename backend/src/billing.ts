@@ -1,10 +1,11 @@
 import { Hono } from "hono";
 import { fromBase64, base64, hmacSha256, nowSeconds, timingSafeEqual } from "./crypto";
-import { getSubscription, planForProduct } from "./db";
+import type { Plan, Store } from "./db";
 import type { AppContext, AppEnv } from "./env";
 import { publicOrigin } from "./auth";
 
 const WEBHOOK_TOLERANCE_SECONDS = 5 * 60;
+const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
 
 function dodoBase(env: AppEnv): string {
   return env.DODO_ENVIRONMENT === "live_mode" ? "https://live.dodopayments.com" : "https://test.dodopayments.com";
@@ -23,13 +24,18 @@ async function dodo(env: AppEnv, path: string, body: unknown): Promise<Record<st
 /** Authenticated routes under /v1/billing. */
 export const billing = new Hono<AppContext>();
 
+/** Body: { "plan": "monthly" | "yearly" | "lifetime" }. Defaults to monthly. */
 billing.post("/checkout", async (c) => {
   const user = c.get("user");
+  const body = await c.req.json<{ plan?: string }>().catch(() => ({}) as { plan?: string });
+  const plan = await c.var.store.plan(body.plan || "monthly");
+  if (!plan) return c.json({ error: "unknown_plan" }, 400);
+  if (!plan.dodo_product_id) return c.json({ error: "plan_not_configured" }, 503);
   try {
     const session = await dodo(c.env, "/checkouts", {
-      product_cart: [{ product_id: c.env.DODO_PRODUCT_ID, quantity: 1 }],
+      product_cart: [{ product_id: plan.dodo_product_id, quantity: 1 }],
       customer: { email: user.email, name: user.name || user.email },
-      metadata: { user_id: user.id },
+      metadata: { user_id: user.id, plan_id: plan.id },
       return_url: `${publicOrigin(c)}/billing/return`,
     });
     const url = session.checkout_url;
@@ -42,7 +48,7 @@ billing.post("/checkout", async (c) => {
 });
 
 billing.post("/portal", async (c) => {
-  const sub = await getSubscription(c.env.DB, c.get("user").id);
+  const sub = await c.var.store.subscription(c.get("user").id);
   if (!sub?.dodo_customer_id) return c.json({ error: "no_subscription" }, 402);
   try {
     const session = await dodo(c.env, `/customers/${sub.dodo_customer_id}/customer-portal/session`, {});
@@ -60,11 +66,11 @@ export const billingPublic = new Hono<AppContext>();
 
 billingPublic.get("/billing/return", (c) => {
   const ok = c.req.query("status") === "active" || c.req.query("status") === "succeeded";
-  const title = ok ? "You're subscribed" : "Checkout finished";
+  const title = ok ? "You're all set" : "Checkout finished";
   const appUrl = `${c.env.APP_URL_SCHEME}://billing?status=${encodeURIComponent(c.req.query("status") ?? "")}`;
   return c.html(
     `<!doctype html><html><head><meta charset="utf-8"><title>${title} · Hear Agent</title><meta http-equiv="refresh" content="0;url=${appUrl}">
-<style>body{font:16px -apple-system,system-ui,sans-serif;display:grid;place-items:center;height:90vh}main{text-align:center}a{color:#6b4eff}</style></head>
+<style>body{font:16px -apple-system,system-ui,sans-serif;display:grid;place-items:center;height:90vh}main{text-align:center}a{color:#111}</style></head>
 <body><main><h1>${title}</h1><p>You can go back to Hear Agent now.</p><p><a href="${appUrl}">Open Hear Agent</a></p></main></body></html>`,
   );
 });
@@ -77,15 +83,13 @@ billingPublic.post("/webhooks/dodo", async (c) => {
   if (!(await verifyWebhook(c.env.DODO_WEBHOOK_SECRET, id, timestamp, raw, signature))) {
     return c.json({ error: "invalid_signature" }, 401);
   }
-  const fresh = await c.env.DB.prepare("INSERT OR IGNORE INTO webhook_events (id, type, received_at) VALUES (?1, '', ?2)")
-    .bind(id, nowSeconds())
-    .run();
-  if (fresh.meta.changes === 0) return c.json({ ok: true, duplicate: true });
+  const event = JSON.parse(raw) as { type: string; data: DodoSubscription & DodoPayment };
+  if (!(await c.var.store.recordWebhook(id, event.type))) return c.json({ ok: true, duplicate: true });
 
-  const event = JSON.parse(raw) as { type: string; data: DodoSubscription };
-  await c.env.DB.prepare("UPDATE webhook_events SET type = ?1 WHERE id = ?2").bind(event.type, id).run();
   if (event.type.startsWith("subscription.")) {
-    await applySubscriptionEvent(c.env, event.type, event.data);
+    await applySubscriptionEvent(c.var.store, event.type, event.data);
+  } else if (event.type === "payment.succeeded" && !event.data.subscription_id) {
+    await applyLifetimePayment(c.var.store, event.data);
   }
   return c.json({ ok: true });
 });
@@ -114,78 +118,75 @@ export interface DodoSubscription {
   metadata?: Record<string, unknown>;
 }
 
-const toSeconds = (iso?: string) => (iso ? Math.floor(Date.parse(iso) / 1000) : null);
+export interface DodoPayment {
+  payment_id: string;
+  subscription_id?: string | null;
+  customer?: { customer_id?: string; email?: string };
+  metadata?: Record<string, unknown>;
+}
 
-export async function applySubscriptionEvent(env: AppEnv, type: string, s: DodoSubscription): Promise<void> {
-  const db = env.DB;
-  const userId = await resolveUser(db, s);
+const meta = (m: Record<string, unknown> | undefined, key: string) => (typeof m?.[key] === "string" ? (m[key] as string) : null);
+
+async function planFor(store: Store, productId: string | null, metadataPlan: string | null): Promise<Plan | null> {
+  return (productId ? await store.planForProduct(productId) : null) ?? (metadataPlan ? await store.plan(metadataPlan) : null);
+}
+
+export async function applySubscriptionEvent(store: Store, type: string, s: DodoSubscription): Promise<void> {
+  const userId = await store.webhookUser(meta(s.metadata, "user_id"), s.subscription_id, s.customer?.email ?? null);
   if (!userId) {
     console.log(JSON.stringify({ event: "webhook_unmatched", type, subscription: s.subscription_id }));
     return;
   }
-  const plan = await planForProduct(db, s.product_id, env.DODO_PRODUCT_ID);
+  const plan = await planFor(store, s.product_id, meta(s.metadata, "plan_id"));
   if (!plan) {
     console.log(JSON.stringify({ event: "webhook_unknown_product", product: s.product_id }));
     return;
   }
-  const periodStart = toSeconds(s.previous_billing_date);
-  const periodEnd = toSeconds(s.next_billing_date);
-  const existing = await db.prepare("SELECT plan_id, period_start FROM subscriptions WHERE user_id = ?1")
-    .bind(userId)
-    .first<{ plan_id: string; period_start: number | null }>();
-  // A new billing period (first activation or renewal) refills the monthly credits.
-  const newPeriod = !existing || (periodStart !== null && existing.period_start !== periodStart);
-  const status = type === "subscription.cancelled" ? "cancelled" : s.status;
-
-  await db
-    .prepare(
-      `INSERT INTO subscriptions (user_id, dodo_subscription_id, dodo_customer_id, plan_id, status, period_start, period_end,
-         cancel_at_period_end, credits_total, credits_used, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)
-       ON CONFLICT(user_id) DO UPDATE SET
-         dodo_subscription_id = excluded.dodo_subscription_id,
-         dodo_customer_id = COALESCE(excluded.dodo_customer_id, subscriptions.dodo_customer_id),
-         plan_id = excluded.plan_id,
-         status = excluded.status,
-         period_start = COALESCE(excluded.period_start, subscriptions.period_start),
-         period_end = COALESCE(excluded.period_end, subscriptions.period_end),
-         cancel_at_period_end = excluded.cancel_at_period_end,
-         credits_total = excluded.credits_total,
-         credits_used = CASE WHEN ?11 THEN 0 ELSE subscriptions.credits_used END,
-         updated_at = excluded.updated_at`,
-    )
-    .bind(
-      userId,
-      s.subscription_id,
-      s.customer?.customer_id ?? null,
-      plan.id,
-      status,
-      periodStart,
-      periodEnd,
-      s.cancel_at_next_billing_date ? 1 : 0,
-      plan.monthly_credits,
-      nowSeconds(),
-      newPeriod ? 1 : 0,
-    )
-    .run();
-  console.log(JSON.stringify({ event: "subscription_updated", type, status, user: userId, new_period: newPeriod }));
+  const existing = await store.subscription(userId);
+  // A lifetime purchase outlives any subscription event for the same user.
+  if (existing && existing.plan_id !== plan.id && existing.status === "active" && existing.current_period_end === null) return;
+  // First activation, or a switch to another plan, starts a fresh credit month.
+  const fresh = !existing || existing.plan_id !== plan.id;
+  await store.saveSubscription({
+    user_id: userId,
+    plan_id: plan.id,
+    status: type === "subscription.cancelled" ? "cancelled" : s.status,
+    dodo_subscription_id: s.subscription_id,
+    dodo_payment_id: existing?.dodo_payment_id ?? null,
+    dodo_customer_id: s.customer?.customer_id ?? existing?.dodo_customer_id ?? null,
+    current_period_start: s.previous_billing_date ?? existing?.current_period_start ?? null,
+    current_period_end: s.next_billing_date ?? existing?.current_period_end ?? null,
+    cancel_at_period_end: !!s.cancel_at_next_billing_date,
+    credits_total: plan.monthly_credits,
+    credits_reset_at: fresh ? new Date(Date.now() + MONTH_MS).toISOString() : existing!.credits_reset_at,
+    ...(fresh ? { credits_used: 0 } : {}),
+  });
+  console.log(JSON.stringify({ event: "subscription_updated", type, status: s.status, user: userId, plan: plan.id }));
 }
 
-async function resolveUser(db: D1Database, s: DodoSubscription): Promise<string | null> {
-  const fromMetadata = typeof s.metadata?.user_id === "string" ? s.metadata.user_id : null;
-  if (fromMetadata) {
-    const u = await db.prepare("SELECT id FROM users WHERE id = ?1").bind(fromMetadata).first<{ id: string }>();
-    if (u) return u.id;
+/** One-time payments are only used for the lifetime plan. */
+export async function applyLifetimePayment(store: Store, p: DodoPayment): Promise<void> {
+  const plan = await planFor(store, null, meta(p.metadata, "plan_id"));
+  if (plan?.billing_interval !== "lifetime") return;
+  const userId = await store.webhookUser(meta(p.metadata, "user_id"), null, p.customer?.email ?? null);
+  if (!userId) {
+    console.log(JSON.stringify({ event: "webhook_unmatched", type: "payment.succeeded", payment: p.payment_id }));
+    return;
   }
-  const bySub = await db.prepare("SELECT user_id FROM subscriptions WHERE dodo_subscription_id = ?1")
-    .bind(s.subscription_id)
-    .first<{ user_id: string }>();
-  if (bySub) return bySub.user_id;
-  if (s.customer?.email) {
-    const byEmail = await db.prepare("SELECT id FROM users WHERE email = ?1 ORDER BY created_at LIMIT 1")
-      .bind(s.customer.email)
-      .first<{ id: string }>();
-    if (byEmail) return byEmail.id;
-  }
-  return null;
+  const existing = await store.subscription(userId);
+  await store.saveSubscription({
+    user_id: userId,
+    plan_id: plan.id,
+    status: "active",
+    dodo_subscription_id: existing?.dodo_subscription_id ?? null,
+    dodo_payment_id: p.payment_id,
+    dodo_customer_id: p.customer?.customer_id ?? existing?.dodo_customer_id ?? null,
+    current_period_start: new Date().toISOString(),
+    current_period_end: null,
+    cancel_at_period_end: false,
+    credits_total: plan.monthly_credits,
+    credits_used: 0,
+    credits_reset_at: new Date(Date.now() + MONTH_MS).toISOString(),
+  });
+  console.log(JSON.stringify({ event: "lifetime_purchased", user: userId }));
 }

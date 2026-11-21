@@ -164,38 +164,44 @@ struct AgentRoutes: Identifiable {
         var exists: Bool { FileManager.default.fileExists(atPath: (path as NSString).expandingTildeInPath) }
     }
 
-    let name: String
-    let color: Color
-    let symbol: String
+    let brand: AgentBrand
     let routes: [Route]
-    let mcpServers: Int
+    var name: String { brand.title }
     var id: String { name }
 
     static func all() -> [AgentRoutes] {
         [
-            AgentRoutes(name: "Claude", color: Theme.claude, symbol: "asterisk", routes: [
+            AgentRoutes(brand: .claude, routes: [
                 Route(name: "Skills", symbol: "sparkles", path: "~/.claude/skills"),
                 Route(name: "Agents", symbol: "person.2", path: "~/.claude/agents"),
                 Route(name: "Commands", symbol: "command", path: "~/.claude/commands"),
+                Route(name: "Rules", symbol: "doc.text", path: "~/.claude/CLAUDE.md"),
                 Route(name: "Plugins", symbol: "puzzlepiece.extension", path: "~/.claude/plugins"),
-                Route(name: "Memory", symbol: "doc.text", path: "~/.claude/CLAUDE.md"),
                 Route(name: "Config", symbol: "gearshape", path: "~/.claude/settings.json"),
-            ], mcpServers: mcpCount(jsonAt: "~/.claude.json", key: "mcpServers")),
-            AgentRoutes(name: "Codex", color: Theme.codex, symbol: "chevron.left.forwardslash.chevron.right", routes: [
+            ]),
+            AgentRoutes(brand: .codex, routes: [
                 Route(name: "Skills", symbol: "sparkles", path: "~/.codex/skills"),
                 Route(name: "Prompts", symbol: "text.bubble", path: "~/.codex/prompts"),
                 Route(name: "Rules", symbol: "doc.text", path: "~/.codex/AGENTS.md"),
+                Route(name: "Plugins", symbol: "puzzlepiece.extension", path: "~/.codex/plugins"),
                 Route(name: "Sessions", symbol: "clock.arrow.circlepath", path: "~/.codex/sessions"),
                 Route(name: "Config", symbol: "gearshape", path: "~/.codex/config.toml"),
-            ], mcpServers: tomlSectionCount(at: "~/.codex/config.toml", prefix: "[mcp_servers.")),
-            AgentRoutes(name: "Gemini", color: Color(red: 0.26, green: 0.52, blue: 0.96), symbol: "diamond", routes: [
+            ]),
+            AgentRoutes(brand: .gemini, routes: [
                 Route(name: "Folder", symbol: "folder", path: "~/.gemini"),
+                Route(name: "Rules", symbol: "doc.text", path: "~/.gemini/GEMINI.md"),
                 Route(name: "Config", symbol: "gearshape", path: "~/.gemini/settings.json"),
-            ], mcpServers: mcpCount(jsonAt: "~/.gemini/settings.json", key: "mcpServers")),
-            AgentRoutes(name: "Cursor", color: Theme.ink, symbol: "cube", routes: [
+            ]),
+            AgentRoutes(brand: .cursor, routes: [
                 Route(name: "Rules", symbol: "doc.text", path: "~/.cursor/rules"),
+                Route(name: "Skills", symbol: "sparkles", path: "~/.cursor/skills"),
                 Route(name: "MCP", symbol: "server.rack", path: "~/.cursor/mcp.json"),
-            ], mcpServers: mcpCount(jsonAt: "~/.cursor/mcp.json", key: "mcpServers")),
+            ]),
+            AgentRoutes(brand: .opencode, routes: [
+                Route(name: "Folder", symbol: "folder", path: "~/.config/opencode"),
+                Route(name: "Agents", symbol: "person.2", path: "~/.config/opencode/agent"),
+                Route(name: "Config", symbol: "gearshape", path: "~/.config/opencode/opencode.json"),
+            ]),
         ]
     }
 
@@ -208,19 +214,6 @@ struct AgentRoutes: Identifiable {
         } else {
             NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
         }
-    }
-
-    private static func mcpCount(jsonAt path: String, key: String) -> Int {
-        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        guard let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let servers = json[key] as? [String: Any] else { return 0 }
-        return servers.count
-    }
-
-    private static func tomlSectionCount(at path: String, prefix: String) -> Int {
-        let text = (try? String(contentsOfFile: (path as NSString).expandingTildeInPath, encoding: .utf8)) ?? ""
-        return text.split(separator: "\n").filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix(prefix) }.count
     }
 }
 

@@ -39,6 +39,8 @@ targets:
         LSApplicationCategoryType: public.app-category.developer-tools
         NSAppleEventsUsageDescription: Hear Agent opens Terminal to run your saved actions and resume sessions.
         HearAgentAPIBaseURL: $(HEARAGENT_API_BASE_URL)
+        HearAgentSupabaseURL: $(HEARAGENT_SUPABASE_URL)
+        HearAgentSupabaseKey: $(HEARAGENT_SUPABASE_KEY)
         CFBundleURLTypes:
           - CFBundleURLName: com.karthikponna.hearagent
             CFBundleURLSchemes: [hearagent]
@@ -48,12 +50,16 @@ targets:
         PRODUCT_NAME: Hear Agent
         ENABLE_APP_SANDBOX: NO
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+        # Supabase → Project Settings → Data API (URL) and API Keys (publishable key).
+        # The publishable key is meant to ship in apps; never put the secret key here.
+        HEARAGENT_SUPABASE_URL: https://rgxpoyfgcscwkldquhvv.supabase.co
+        HEARAGENT_SUPABASE_KEY: sb_publishable_ZZ3kE43DfJrKHkWBwlaSew_U1juuR0s
       configs:
         Debug:
           HEARAGENT_API_BASE_URL: http://localhost:8787
-        # Replace with your deployed Worker URL (wrangler deploy prints it), e.g. https://api.hearagent.app
+        # The deployed Worker (wrangler deploy prints it). Switch to a custom domain once one is set up.
         Release:
-          HEARAGENT_API_BASE_URL: https://api.hearagent.app
+          HEARAGENT_API_BASE_URL: https://hearagent-api.brandmyiphone.workers.dev
     postBuildScripts:
       - name: Bundle hearagent-hook
         basedOnDependencyAnalysis: false

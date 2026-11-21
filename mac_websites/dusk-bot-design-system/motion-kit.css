@@ -1,0 +1,147 @@
+/* motion kit v2: paste whole into <style>, before your own rules; motion.min.js then motion-kit-v2.js go right before </body>.
+   contract: nothing here hides content on its own. every hidden state needs a class the script adds (.mk-armed),
+   so a page without the scripts, without Motion or without IntersectionObserver is complete.
+   springs run in javascript (Motion); this file holds rest and hidden states, tokens and the no-script fallbacks. */
+
+:root {
+  /* v1 tokens, unchanged, for css you write yourself */
+  --mk-ease-out: cubic-bezier(.23, 1, .32, 1);
+  --mk-ease-expo: cubic-bezier(.16, 1, .3, 1);
+  --mk-ease-in-out: cubic-bezier(.77, 0, .175, 1);
+  --mk-ease-spring: linear(0, .049, .165, .311, .46, .599, .718, .815, .89, .945, .982, 1.007, 1.021, 1.027, 1.028, 1.027, 1.023, 1.019, 1.015, 1.011, 1.008, 1.005, 1);
+  --mk-dur-press: 160ms;
+  --mk-dur-hover: 240ms;
+  --mk-dur-spring: 600ms;
+  --mk-dur-reveal: 800ms;
+  --mk-dur-wipe: 1000ms;
+  --mk-dur-theme: 700ms;
+  --mk-stagger: 70ms;
+  --mk-rise: 24px;
+  /* springs the script reads: visual duration in seconds, then bounce. override per element or section */
+  --mk-spring-reveal: .55 .08;
+  --mk-spring-load: .42 .06;
+  --mk-spring-wipe: .7 0;
+  /* Motion's spring sampled to css: use these for state changes you style yourself (steps, toggles, menus) */
+  --mk-ease-spring-ui: linear(0, .1176, .3457, .5719, .7511, .8746, .9503, .9911, 1.0095, 1.015, 1.0141, 1.0109, 1.0074, 1.0044, 1.0023, 1.001, 1.0003, 1);
+  --mk-dur-spring-ui: 550ms;
+  --mk-ease-spring-soft: linear(0, .0359, .1203, .2275, .3409, .4505, .5506, .6386, .7137, .7764, .8277, .8689, .9017, .9272, .9469, .9619, .9732, .9815, .9876, .9919, .995, .9971, .9986, .9995, 1.0001, 1, 1);
+  --mk-dur-spring-soft: 800ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --mk-dur-spring-ui: 0ms; --mk-dur-spring-soft: 0ms; }
+}
+
+/* teleports (anchor jumps, capture tools returning to the top, resizes) skip css transitions for two frames */
+.mk-instant, .mk-instant *, .mk-instant *::before, .mk-instant *::after { transition: none !important; }
+
+/* ---------- reveal: armed = about to be met; the spring takes it from here to its natural state ---------- */
+[data-mk-reveal].mk-armed { opacity: 0; translate: 0 var(--mk-rise); }
+[data-mk-reveal="fade"].mk-armed { translate: none; }
+
+/* stagger: the container triggers, its children move */
+[data-mk-reveal][data-mk-stagger].mk-armed { opacity: 1; translate: none; }
+[data-mk-stagger].mk-armed > * { opacity: 0; translate: 0 var(--mk-rise); }
+
+/* lines and words: every word sits in its own mask */
+[data-mk-reveal="words"] { --mk-stagger: 32ms; }
+[data-mk-reveal="lines"].mk-armed, [data-mk-reveal="words"].mk-armed { opacity: 1; translate: none; }
+.mk-w { display: inline-block; overflow: clip; vertical-align: top; padding: .08em .02em .18em; margin: -.08em -.02em -.18em; }
+.mk-wi { display: inline-block; }
+.mk-armed .mk-wi { translate: 0 125%; }
+
+/* image clip wipe on the frame; the picture inside settles from a slight zoom */
+[data-mk-reveal="clip"].mk-armed { opacity: 1; translate: none; clip-path: inset(100% 0% 0% 0%); }
+[data-mk-reveal="clip"][data-mk-from="top"].mk-armed { clip-path: inset(0% 0% 100% 0%); }
+[data-mk-reveal="clip"][data-mk-from="left"].mk-armed { clip-path: inset(0% 100% 0% 0%); }
+[data-mk-reveal="clip"][data-mk-from="right"].mk-armed { clip-path: inset(0% 0% 0% 100%); }
+[data-mk-reveal="clip"][data-mk-from="center"].mk-armed { clip-path: inset(18% 18% 18% 18%); }
+[data-mk-reveal="clip"].mk-armed img { scale: 1.14; }
+
+/* image scale reveal: the frame grows in while the picture counter-settles */
+[data-mk-reveal="scale"].mk-armed { translate: none; scale: .92; }
+[data-mk-reveal="scale"].mk-armed img { scale: 1.12; }
+
+/* numbers: the final text keeps the width, the aria-hidden run shows the spring */
+[data-mk-reveal="count"].mk-armed, [data-mk-reveal="roll"].mk-armed { opacity: 1; translate: none; }
+[data-mk-reveal="count"], [data-mk-reveal="roll"], [data-mk-alt] { font-variant-numeric: tabular-nums; }
+.mk-count { display: inline-grid; }
+.mk-count > * { grid-area: 1 / 1; }
+.mk-count-run { justify-self: end; }
+.mk-armed .mk-count-final, .mk-counting .mk-count-final { opacity: 0; }
+.mk-roll { white-space: nowrap; }
+.mk-rc { display: inline-block; position: relative; overflow: clip; vertical-align: top; padding: .08em 0 .18em; margin: -.08em 0 -.18em; }
+.mk-rc-size { visibility: hidden; }
+.mk-rc-strip { position: absolute; inset: .08em 0 auto; display: flex; flex-direction: column; align-items: center; }
+.mk-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+/* ---------- press, lift, magnet: springs run in the script; these are the no-script fallbacks ---------- */
+:is([data-mk-magnet], [data-mk-press], [data-mk-lift]) { transition: background-color var(--mk-dur-hover) ease, color var(--mk-dur-hover) ease, border-color var(--mk-dur-hover) ease, opacity var(--mk-dur-hover) ease; }
+html:not(.mk-press-on) [data-mk-press] { transition: scale var(--mk-dur-press) var(--mk-ease-out), background-color var(--mk-dur-hover) ease, color var(--mk-dur-hover) ease, border-color var(--mk-dur-hover) ease, opacity var(--mk-dur-hover) ease; }
+html:not(.mk-press-on) [data-mk-press]:active { scale: .97; }
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  html:not(.mk-lift-on) [data-mk-lift] { transition: translate var(--mk-dur-spring-ui) var(--mk-ease-spring-ui), background-color var(--mk-dur-hover) ease, color var(--mk-dur-hover) ease, border-color var(--mk-dur-hover) ease, opacity var(--mk-dur-hover) ease; }
+  html:not(.mk-lift-on) [data-mk-lift]:hover { translate: 0 -4px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html:not(.mk-press-on) [data-mk-press]:active { scale: none; opacity: .82; }
+}
+
+/* ---------- indicator: a plain fill that springs between options. 100x100 layout box, drawn with transform ---------- */
+:where(:has(> [data-mk-indicator])) { position: relative; isolation: isolate; }
+[data-mk-indicator] { position: absolute; left: 0; top: 0; z-index: -1; width: 100px; height: 100px; transform-origin: 0 0; pointer-events: none; opacity: 0; transition: opacity 180ms ease; }
+[data-mk-indicator].mk-placed { opacity: 1; }
+
+/* ---------- switch thumb: css spring when the script is absent; the script flips it otherwise ---------- */
+html:not(.mk-motion) [data-mk-thumb] { transition: translate var(--mk-dur-spring-ui) var(--mk-ease-spring-ui); }
+
+/* ---------- parallax: the picture is oversized by k of its frame only while the kit drives it ---------- */
+[data-mk-parallax].mk-on { position: absolute; left: 0; right: auto; top: calc(var(--mk-k) * -50%); bottom: auto; width: 100%; max-width: none; height: calc(100% * (1 + var(--mk-k))); object-fit: cover; will-change: translate; }
+
+/* ---------- reading progress: the kit writes scale; without it the bar is simply empty ---------- */
+[data-mk-progress] { transform-origin: 0 50%; scale: 0 1; }
+
+/* ---------- depth layers (engine recipe) ---------- */
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  [data-mk-depth] { will-change: translate; }
+}
+
+/* ---------- swipe row: v1 strip markup stays a native, snapping row (no pinning in v2) ---------- */
+[data-mk-strip-track] { display: flex; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: thin; }
+[data-mk-strip-track] > * { flex: none; scroll-snap-align: start; }
+
+/* ---------- marquee ---------- */
+[data-mk-marquee] { overflow: clip; }
+[data-mk-marquee-track] { display: flex; width: max-content; }
+[data-mk-marquee]:not(.mk-on) [data-mk-marquee-track], [data-mk-marquee]:not(.mk-on) [data-mk-marquee-track] > * { width: auto; flex-wrap: wrap; white-space: normal; }
+[data-mk-marquee].mk-on [data-mk-marquee-track] { animation: mk-marquee var(--mk-marquee-dur, 40s) linear infinite; }
+[data-mk-marquee].mk-on:is([data-mk-paused], .mk-offscreen) [data-mk-marquee-track] { animation-play-state: paused; }
+@keyframes mk-marquee { to { translate: var(--mk-marquee-shift, -50%) 0; } }
+@media (hover: hover) and (pointer: fine) {
+  [data-mk-marquee].mk-on.mk-hover-pause:hover [data-mk-marquee-track] { animation-play-state: paused; }
+}
+
+/* ---------- hover preview that follows the cursor ---------- */
+[data-mk-preview-host] { position: fixed; left: 0; top: 0; z-index: 60; width: var(--mk-preview-w, 280px); aspect-ratio: 4 / 3; pointer-events: none; opacity: 0; scale: .94; transform-origin: 0 50%; transition: opacity 220ms var(--mk-ease-out), scale 380ms var(--mk-ease-out); }
+[data-mk-preview-host].is-on { opacity: 1; scale: 1; }
+[data-mk-preview-host] img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 180ms ease; }
+[data-mk-preview-host] img.is-active { opacity: 1; }
+@media not ((hover: hover) and (pointer: fine)) { [data-mk-preview-host] { display: none; } }
+@media (prefers-reduced-motion: reduce) { [data-mk-preview-host] { scale: 1; transition: opacity 220ms ease; } }
+
+/* ---------- image hover: slow, small, gated to real pointers ---------- */
+[data-mk-zoom] { overflow: clip; }
+[data-mk-zoom] img { transition: transform 900ms var(--mk-ease-out), opacity var(--mk-dur-hover) ease; }
+@media (hover: hover) and (pointer: fine) {
+  :is(a, [data-mk-zoom]):hover [data-mk-zoom] img, [data-mk-zoom]:hover img, a:focus-visible [data-mk-zoom] img { transform: scale(1.04); }
+}
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: reduce) {
+  :is(a, [data-mk-zoom]):hover [data-mk-zoom] img, [data-mk-zoom]:hover img, a:focus-visible [data-mk-zoom] img { transform: none; opacity: .86; }
+}
+
+/* ---------- smooth wheel needs native scroll positions to stay instant ---------- */
+html[data-mk-smooth] { scroll-behavior: auto !important; }
+
+@media print {
+  [data-mk-reveal], [data-mk-reveal] > *, [data-mk-reveal] img { opacity: 1 !important; translate: none !important; scale: none !important; clip-path: none !important; }
+  .mk-wi { translate: none !important; }
+}
